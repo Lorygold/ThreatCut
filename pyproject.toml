@@ -1,0 +1,7 @@
+[project]
+name = "threatcut"
+version = "0.1.0"
+description = "Graph Interdiction & Cybersecurity Optimization Framework "
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
