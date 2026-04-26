@@ -29,6 +29,11 @@ from typing import Optional
 import networkx as nx
 import matplotlib.pyplot as plt
 
+# add project root folder
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from model.attack_graph import AttackGraph
 
 
