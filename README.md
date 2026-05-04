@@ -141,9 +141,9 @@ Solving with Greedy heuristic ...
 ==============================================================
 Method                  Breach Loss    Gap%  Time (s)  Iter
 --------------------------------------------------------------
-Exact CCG                    25.0000      —     0.123     3
-LP heuristic                 25.0000   0.00%    0.045     —
-Greedy heuristic             30.0000  20.00%    0.002     —
+Exact CCG                    25.0000      -     0.123     3
+LP heuristic                 25.0000   0.00%    0.045     -
+Greedy heuristic             30.0000  20.00%    0.002     -
 ==============================================================
 
 Optimal interdiction plan (CCG): [(2, 5), (3, 6)]
@@ -259,3 +259,5 @@ ThreatCut/
 MIT License, with reference to the paper cited above.
 
 ---
+*Developed for the Optimization Algorithms course - Prof. Roberto Montemanni,
+University of Modena and Reggio Emilia, A.Y. 2025-2026.*
