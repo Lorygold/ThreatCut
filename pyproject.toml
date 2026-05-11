@@ -9,4 +9,5 @@ dependencies = [
     "matplotlib==3.10.8",
     "pulp==3.3.0",
     "numpy==2.4.4",
+    "gurobipy==13.0.2",
 ]
