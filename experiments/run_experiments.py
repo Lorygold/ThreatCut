@@ -35,7 +35,7 @@ from typing import List
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from data.generator import generate_instances
-from model.algorithm import CCGResult, run_ccg_algorithm, run_heuristic_greedy, run_heuristic_lp
+from model.paper_exact_ccg import CCGResult, run_ccg_algorithm, run_heuristic_greedy, run_heuristic_lp
 
 
 # Experiment configuration

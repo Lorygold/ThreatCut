@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from data.generator import draw_attack_graph, generate_attack_graph
-from model.algorithm import run_ccg_algorithm, run_heuristic_greedy, run_heuristic_lp
+from model.paper_exact_ccg import run_ccg_algorithm, run_heuristic_greedy, run_heuristic_lp
 from model.bilevel import solve_bilevel_small
 
 
