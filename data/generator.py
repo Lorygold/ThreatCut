@@ -1,148 +1,188 @@
 """
 data/generator.py
 
-Synthetic attack graph generator following the experimental setup of:
+Synthetic attack graph generator matching EXACTLY the procedure described in
+Section 5 of:
+
     Nandi, Medal, Vadlamani (2016)
     "Interdicting Attack Graphs to Protect Organizations from Cyber Attacks"
     Computers & Operations Research, Vol. 75, pp. 118-131
 
-Graph structure (Section 5 - Computational Experiments):
-  - L levels (excluding the source at level 0)
-  - W nodes per level
-  - Each node at level l is connected to exactly d nodes chosen
-    uniformly at random from level l+1
-  - arc cost_attack    ~ Uniform[1, 10]  (integer)
-  - arc cost_interdict ~ Uniform[1, 5]   (integer)
-  - goal node reward   ~ Uniform[10, 50] (integer)
+Generation procedure (Section 5, paragraphs 3-4):
+  1. n_nodes nodes split evenly across r levels.
+     Level 0 = vulnerability nodes; level r-1 = goal nodes; rest = transition.
+  2. Arc from level l to l+1 with probability pd for each pair of nodes.
+  3. Arc between nodes in the SAME level with probability ps.
+  4. Each transition/goal node with no incoming arc receives one random
+     incoming arc from a prior level (ensures full connectivity).
 
-Parameter ranges used in the paper:
-  L in {3, 4, 5}
-  W in {3, 4, 5}
-  d in {2, 3}
+Parameter values from Table 2 of the paper:
+  Network sizes       : 50, 100, 150, 200 nodes
+  (size, levels)      : (50,5),(50,7),(50,10),(100,2),(100,5),(150,5),(200,5)
+  Target arc density  : ≈ 2.15 × n_nodes
+  Loss (reward)       : Uniform(500,1500) or Uniform(1000,2000)
+  Attack cost c_a     : Uniform(10,30)    or Uniform(30,50)
+  Defense cost c_d    : Uniform(10,30)    or Uniform(30,50)
 """
 
 from __future__ import annotations
 
 import random
-from typing import Optional
-
-import networkx as nx
-import matplotlib.pyplot as plt
-
-# add project root folder
 import sys
 from pathlib import Path
+from typing import List, Optional, Tuple
+
+import matplotlib.pyplot as plt
+import networkx as nx
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from model.attack_graph import AttackGraph
 
 
+
+# Core generator
+
 def generate_attack_graph(
-    L: int,
-    W: int,
-    d: int,
+    n_nodes: int,
+    n_levels: int,
+    pd: float,
+    ps: float = 0.0,
+    reward_low: int = 500,
+    reward_high: int = 1500,
+    attack_cost_low: int = 10,
+    attack_cost_high: int = 30,
+    defend_cost_low: int = 10,
+    defend_cost_high: int = 30,
     seed: Optional[int] = None,
 ) -> AttackGraph:
     """
-    Generate a synthetic attack graph with L levels, W nodes per level,
-    and out-degree d per node (connecting to the next level).
+    Generate a synthetic attack graph following the paper's exact procedure.
 
     Parameters
     ----------
-    L    : int
-        Number of levels EXCLUDING the source node at level 0.
-        Total levels in the graph = L + 1  (0 to L).
-        Goal nodes sit at level L.
-    W    : int
-        Number of nodes per level (levels 1 to L).
-        Level 0 always has exactly 1 source node.
-    d    : int
-        Out-degree of each non-goal node.
-        Each node at level l picks d distinct targets at level l+1.
-        If d > W, it is clamped to W (connects to all nodes in next level).
-    seed : int, optional
-        Random seed for reproducibility. Pass the same seed to get the
-        same graph; vary the seed to get the N=10 instances per parameter
-        combination used in the paper's experiments.
-
-    Returns
-    -------
-    AttackGraph
-        A fully constructed AttackGraph ready to be passed to the solver.
-
-    Notes
-    -----
-    Node id assignment:
-        level 0 : node id = 0  (single source)
-        level l : node ids = [ 1 + (l-1)*W + i  for i in 0..W-1 ]
-
-    Examples
-    --------
-    g = generate_attack_graph(L=3, W=3, d=2, seed=42)
-    print(g.summary())
-    g = generate_attack_graph(L=4, W=4, d=3, seed=0)
+    n_nodes          : Total number of nodes.
+    n_levels         : Number of levels r >= 2.
+    pd               : Probability of arc between any pair in adjacent levels.
+    ps               : Probability of arc between any pair in the same level.
+    reward_low/high  : Uniform range for goal node rewards.
+    attack_cost_low/high  : Uniform range for c_a (attacker arc cost).
+    defend_cost_low/high  : Uniform range for c_d (defender arc cost).
+    seed             : RNG seed for reproducibility.
     """
+    if n_levels < 2:
+        raise ValueError("n_levels must be >= 2")
+    if n_nodes < n_levels:
+        raise ValueError("n_nodes must be >= n_levels")
 
     rng = random.Random(seed)
     graph = AttackGraph()
 
-    # Create nodes
-    # Level 0: single source node (id=0), no reward
-    graph.add_node(node_id=0, level=0, reward=0.0)
+    # Step 1: assign nodes to levels
+    base, rem = divmod(n_nodes, n_levels)
+    level_nodes: List[List[int]] = []
+    nid = 0
+    for lv in range(n_levels):
+        size = base + (1 if lv < rem else 0)
+        ids = list(range(nid, nid + size))
+        level_nodes.append(ids)
+        is_goal = (lv == n_levels - 1)
+        for node_id in ids:
+            reward = float(rng.randint(reward_low, reward_high)) if is_goal else 0.0
+            graph.add_node(node_id=node_id, level=lv, reward=reward)
+        nid += size
 
-    # Levels 1 to L-1: intermediate nodes, no reward
-    for level in range(1, L):
-        for i in range(W):
-            node_id = _node_id(level, i, W)
-            graph.add_node(node_id=node_id, level=level, reward=0.0)
+    # Step 2: inter-level arcs with probability pd
+    for lv in range(n_levels - 1):
+        for src in level_nodes[lv]:
+            for dst in level_nodes[lv + 1]:
+                if rng.random() < pd:
+                    ca = float(rng.randint(attack_cost_low, attack_cost_high))
+                    cd = float(rng.randint(defend_cost_low, defend_cost_high))
+                    graph.add_arc(src=src, dst=dst, cost_attack=ca, cost_interdict=cd)
 
-    # Level L: goal nodes, reward sampled from Uniform[10, 50]
-    for i in range(W):
-        node_id = _node_id(L, i, W)
-        reward = float(rng.randint(10, 50))
-        graph.add_node(node_id=node_id, level=L, reward=reward)
+    # Step 3: same-level arcs with probability ps
+    if ps > 0.0:
+        for lv in range(n_levels):
+            nodes = level_nodes[lv]
+            for i, src in enumerate(nodes):
+                for dst in nodes[i + 1:]:
+                    if rng.random() < ps:
+                        ca = float(rng.randint(attack_cost_low, attack_cost_high))
+                        cd = float(rng.randint(defend_cost_low, defend_cost_high))
+                        graph.add_arc(src=src, dst=dst, cost_attack=ca, cost_interdict=cd)
 
-    # 2. Create arcs
-    # Clamp d to W so we never ask for more targets than nodes available
-    effective_d = min(d, W)
-
-    # Level 0 -> Level 1
-    next_level_ids = [_node_id(1, i, W) for i in range(W)]
-    targets = rng.sample(next_level_ids, effective_d)
-    for dst in targets:
-        ca = float(rng.randint(1, 10))
-        ci = float(rng.randint(1, 5))
-        graph.add_arc(src=0, dst=dst, cost_attack=ca, cost_interdict=ci)
-
-    # Level l -> Level l+1  for l = 1 to L-1
-    for level in range(1, L):
-        next_level_ids = [_node_id(level + 1, i, W) for i in range(W)]
-        for i in range(W):
-            src = _node_id(level, i, W)
-            targets = rng.sample(next_level_ids, effective_d)
-            for dst in targets:
-                # Avoid duplicate arcs (can happen when d is close to W)
-                if (src, dst) not in graph.arcs:
-                    ca = float(rng.randint(1, 10))
-                    ci = float(rng.randint(1, 5))
-                    graph.add_arc(src=src, dst=dst, cost_attack=ca, cost_interdict=ci)
+    # Step 4: guarantee every transition/goal node has >= 1 in-arc
+    for lv in range(1, n_levels):
+        for node_id in level_nodes[lv]:
+            has_in = any(d == node_id for (_, d) in graph.arcs)
+            if not has_in:
+                prior = [n for prev in range(lv) for n in level_nodes[prev]]
+                src = rng.choice(prior)
+                ca = float(rng.randint(attack_cost_low, attack_cost_high))
+                cd = float(rng.randint(defend_cost_low, defend_cost_high))
+                graph.add_arc(src=src, dst=node_id, cost_attack=ca, cost_interdict=cd)
 
     return graph
 
 
-# Internal helpers
+# Paper-calibrated wrapper: auto-computes pd to get ~2.15 * n_nodes arcs
 
-def _node_id(level: int, index: int, W: int) -> int:
+def generate_paper_instance(
+    n_nodes: int,
+    n_levels: int,
+    seed: Optional[int] = None,
+    reward_range: Tuple[int, int] = (500, 1500),
+    attack_cost_range: Tuple[int, int] = (10, 30),
+    defend_cost_range: Tuple[int, int] = (10, 30),
+) -> AttackGraph:
     """
-    Compute the node id for the i-th node at the given level.
+    Generate a paper-calibrated instance with ≈ 2.15 * n_nodes arcs.
 
-    Layout:
-        level 0 -> id 0          (source)
-        level 1 -> ids 1 to W
-        level 2 -> ids W+1 to 2W
-        level l -> ids 1+(l-1)*W to l*W
+    pd is computed so that the expected number of inter-level arcs equals
+    the target:  target = 2.15 * n_nodes - expected_step4_arcs
+    Step 4 adds at most one arc per unreachable node (expected ~0 for pd>0.5).
     """
-    return 1 + (level - 1) * W + index
+    base, rem = divmod(n_nodes, n_levels)
+    sizes = [base + (1 if i < rem else 0) for i in range(n_levels)]
+    denom = sum(sizes[i] * sizes[i + 1] for i in range(n_levels - 1))
+    target = 2.15 * n_nodes
+    pd = min(target / denom if denom > 0 else 1.0, 1.0)
+
+    return generate_attack_graph(
+        n_nodes=n_nodes,
+        n_levels=n_levels,
+        pd=pd,
+        ps=0.0,
+        reward_low=reward_range[0],
+        reward_high=reward_range[1],
+        attack_cost_low=attack_cost_range[0],
+        attack_cost_high=attack_cost_range[1],
+        defend_cost_low=defend_cost_range[0],
+        defend_cost_high=defend_cost_range[1],
+        seed=seed,
+    )
+
+
+def generate_instances(
+    n_nodes: int,
+    n_levels: int,
+    n_instances: int = 4,
+    base_seed: int = 0,
+    **kwargs,
+) -> List[AttackGraph]:
+    """
+    Generate n_instances independent graphs (paper uses 4 per combination).
+    """
+    return [
+        generate_paper_instance(
+            n_nodes=n_nodes,
+            n_levels=n_levels,
+            seed=base_seed + i,
+            **kwargs,
+        )
+        for i in range(n_instances)
+    ]
 
 
 # Visualization
@@ -153,93 +193,56 @@ def draw_attack_graph(
     show: bool = True,
     save_path: Optional[str] = None,
 ) -> None:
-    """
-    Draw the attack graph with nodes arranged by level (left to right).
-
-    Source nodes are green, goal nodes are red, intermediate nodes are
-    light blue. Arc labels show attack cost and interdict cost.
-
-    Parameters
-    ----------
-    graph     : AttackGraph  the graph to draw
-    title     : str          plot title
-    show      : bool         call plt.show() at the end
-    save_path : str, optional  if given, save the figure to this path
-    """
     g = graph._graph
-
-    # Group nodes by level to compute positions
-    levels: dict[int, list[int]] = {}
+    levels: dict = {}
     for node_id, node in graph.nodes.items():
         levels.setdefault(node.level, []).append(node_id)
 
-    # Position: x = level, y = rank within level (centred vertically)
-    pos: dict[int, tuple[float, float]] = {}
-    for level, node_ids in sorted(levels.items()):
-        n = len(node_ids)
-        for rank, node_id in enumerate(sorted(node_ids)):
-            x = float(level)
-            y = float(rank) - (n - 1) / 2.0
-            pos[node_id] = (x, y)
+    pos = {}
+    for lv, nids in sorted(levels.items()):
+        n = len(nids)
+        for rank, nid in enumerate(sorted(nids)):
+            pos[nid] = (float(lv), float(rank) - (n - 1) / 2.0)
 
-    # Node colours
-    node_colors = []
     goal_ids = {n.id for n in graph.goal_nodes}
-    for node_id in g.nodes():
-        node = graph.nodes[node_id]
-        if node.level == 0:
-            node_colors.append("#90EE90")   # green  - source
-        elif node_id in goal_ids:
-            node_colors.append("#FF6B6B")   # red    - goal
+    colors = []
+    for nid in g.nodes():
+        lv = graph.nodes[nid].level
+        if lv == 0:
+            colors.append("#90EE90")
+        elif nid in goal_ids:
+            colors.append("#FF6B6B")
         else:
-            node_colors.append("#AED6F1")   # blue   - intermediate
+            colors.append("#AED6F1")
 
-    # Node labels: show id and reward for goal nodes
-    node_labels = {}
-    for node_id, node in graph.nodes.items():
-        if node.reward > 0:
-            node_labels[node_id] = f"{node_id}\nr={node.reward:.0f}"
-        else:
-            node_labels[node_id] = str(node_id)
-
-    # Edge labels: attack cost / interdict cost
+    node_labels = {
+        nid: (f"{nid}\nr={graph.nodes[nid].reward:.0f}"
+              if graph.nodes[nid].reward > 0 else str(nid))
+        for nid in g.nodes()
+    }
     edge_labels = {
-        (arc.src, arc.dst): f"a={arc.cost_attack:.0f}/i={arc.cost_interdict:.0f}"
-        for arc in graph.arcs.values()
+        (a.src, a.dst): f"a={a.cost_attack:.0f}\nd={a.cost_interdict:.0f}"
+        for a in graph.arcs.values()
     }
 
-    fig, ax = plt.subplots(figsize=(max(8, graph.num_levels * 3), 6))
-    ax.set_title(title, fontsize=13, fontweight="bold")
+    fig, ax = plt.subplots(figsize=(max(8, graph.num_levels * 3), 7))
+    ax.set_title(title, fontsize=12, fontweight="bold")
+    nx.draw_networkx_nodes(g, pos, node_color=colors, node_size=700, ax=ax)
+    nx.draw_networkx_labels(g, pos, labels=node_labels, font_size=7, ax=ax)
+    nx.draw_networkx_edges(g, pos, arrows=True, arrowsize=16,
+                           edge_color="#444", ax=ax,
+                           connectionstyle="arc3,rad=0.08")
+    nx.draw_networkx_edge_labels(g, pos, edge_labels=edge_labels,
+                                 font_size=6, ax=ax)
 
-    nx.draw_networkx_nodes(g, pos, node_color=node_colors, node_size=900, ax=ax)
-    nx.draw_networkx_labels(g, pos, labels=node_labels, font_size=8, ax=ax)
-    nx.draw_networkx_edges(
-        g, pos,
-        arrows=True,
-        arrowstyle="-|>",
-        arrowsize=20,
-        edge_color="#444444",
-        ax=ax,
-        connectionstyle="arc3,rad=0.1",
-    )
-    nx.draw_networkx_edge_labels(
-        g, pos,
-        edge_labels=edge_labels,
-        font_size=7,
-        ax=ax,
-    )
-
-    # Legend
     from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor="#90EE90", label="Source (level 0)"),
-        Patch(facecolor="#AED6F1", label="Intermediate"),
-        Patch(facecolor="#FF6B6B", label="Goal (level L)"),
-    ]
-    ax.legend(handles=legend_elements, loc="upper left", fontsize=9)
+    ax.legend(handles=[
+        Patch(facecolor="#90EE90", label="Vulnerability (level 0)"),
+        Patch(facecolor="#AED6F1", label="Transition"),
+        Patch(facecolor="#FF6B6B", label="Goal (last level)"),
+    ], loc="upper left", fontsize=9)
     ax.axis("off")
     plt.tight_layout()
-
     if save_path:
         plt.savefig(save_path, dpi=150)
     if show:
@@ -247,51 +250,15 @@ def draw_attack_graph(
     plt.close(fig)
 
 
-# Batch generator - used in run_experiments.py
-
-def generate_instances(
-    L: int,
-    W: int,
-    d: int,
-    n_instances: int = 10,
-    base_seed: int = 0,
-) -> list[AttackGraph]:
-    """
-    Generate n_instances independent graphs with the same (L, W, d)
-    parameters but different random seeds.
-
-    This matches the paper's experimental protocol: 10 instances per
-    parameter combination, results averaged across instances.
-
-    Parameters
-    ----------
-    L, W, d      : graph parameters (see generate_attack_graph)
-    n_instances  : how many independent instances to generate (default 10)
-    base_seed    : seeds used are base_seed, base_seed+1, ... base_seed+n-1
-
-    Returns
-    -------
-    list[AttackGraph]
-    """
-    return [
-        generate_attack_graph(L=L, W=W, d=d, seed=base_seed + i)
-        for i in range(n_instances)
-    ]
-
-
-# Quick smoke test - run this file directly to verify the generator works
+# Quick smoke test - run this file directly to verify the generator works                                                                                                                                                     ─╯
 
 if __name__ == "__main__":
-    print("Generating a small graph (L=3, W=3, d=2, seed=42)...")
-    g = generate_attack_graph(L=3, W=3, d=2, seed=42)
+    for (n, lv) in [(50, 5), (50, 7), (100, 5), (100, 2)]:
+        g = generate_paper_instance(n_nodes=n, n_levels=lv, seed=0)
+        ratio = len(g.arcs) / n
+        print(f"  nodes={n:3d}  levels={lv}  arcs={len(g.arcs):4d}  "
+              f"ratio={ratio:.2f}  (target≈2.15)")
+    print("\nDrawing 50-node 5-level graph...")
+    g = generate_paper_instance(n_nodes=50, n_levels=5, seed=0)
     print(g.summary())
-    print(f"  Arcs  : {list(g.arcs.keys())}")
-    print(f"  Paths : {g.get_all_paths()}")
-
-    print("\nGenerating 3 instances for (L=3, W=3, d=2)...")
-    instances = generate_instances(L=3, W=3, d=2, n_instances=3)
-    for i, inst in enumerate(instances):
-        print(f"  Instance {i}: {inst}")
-
-    print("\nDrawing graph (close window to exit)...")
-    draw_attack_graph(g, title="Attack Graph - L=3, W=3, d=2, seed=42")
+    draw_attack_graph(g, title="Attack Graph — 50 nodes, 5 levels")
