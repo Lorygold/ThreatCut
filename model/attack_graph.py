@@ -1,27 +1,29 @@
 """
 model/attack_graph.py
 
-Data structures for the attack graph used by all three models.
+Core data structures for the attack graph.
+No solver dependency – pure Python dataclasses.
 """
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Dict, Tuple
 
 
 @dataclass
 class Node:
-    """Represents a node in the attack graph."""
+    """A node in the attack graph (vulnerability, transition, or goal)."""
     node_id: int
-    reward: float = 0.0        # Loss / reward if this goal node is breached
+    reward: float = 0.0   # breach loss / attacker reward; > 0 only for goal nodes
 
 
 @dataclass
 class Arc:
-    """Represents a directed arc (attacker action / exploit) in the attack graph."""
-    tail: int                  # Source node
-    head: int                  # Destination node
-    cost_attack: float = 1.0   # Cost for the attacker to traverse this arc
-    cost_interdict: float = 1.0  # Cost for the defender to interdict this arc
+    """A directed arc representing an attacker action or exploit."""
+    tail: int
+    head: int
+    cost_attack: float = 1.0       # cost for the attacker to traverse this arc
+    cost_interdict: float = 1.0    # cost for the defender to interdict this arc
 
 
 @dataclass
@@ -29,13 +31,11 @@ class AttackGraph:
     """
     Container for the full attack graph G = (N, A).
 
-    Attributes
-    ----------
-    nodes : dict mapping node_id -> Node
-    arcs  : dict mapping (tail, head) -> Arc
+    nodes : dict  node_id       -> Node
+    arcs  : dict  (tail, head)  -> Arc
     """
     nodes: Dict[int, Node] = field(default_factory=dict)
-    arcs: Dict[Tuple[int, int], Arc] = field(default_factory=dict)
+    arcs:  Dict[Tuple[int, int], Arc] = field(default_factory=dict)
 
     def add_node(self, node_id: int, reward: float = 0.0) -> None:
         self.nodes[node_id] = Node(node_id=node_id, reward=reward)
