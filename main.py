@@ -1,184 +1,270 @@
 """
-main.py — Entry point for single-instance runs and convergence plots.
+main.py
 
-Solves a single attack graph instance with the exact CCG algorithm and the
-two heuristics, prints a comparison table, and shows a convergence plot.
+Entry point for the attack-graph interdiction benchmark.
 
-Usage
------
-    # Default small instance
-    python main.py
+Generates the same attack-graph instance described in Section 5 of:
+  Nandi, Medal, Vadlamani (2016) - Computers & Operations Research 75, 118-131
 
-    # Custom parameters
-    python main.py --L 4 --W 4 --d 3 --B_def 20 --B_att 25 --seed 42
+Then runs the three models and prints a comparative performance table.
 
-    # Save convergence plot to file
-    python main.py --save_plot convergence.png
-
-    # Validate against small exact bilevel (only for small graphs)
-    python main.py --L 3 --W 3 --d 2 --validate
+Instance parameters (low-level settings, Table 2 in the paper)
+---------------------------------------------------------------
+  Nodes  : 50
+  Levels : 5
+  Arcs   : ~2.15 × nodes  (≈ 107)
+  Loss   : Uniform(500, 1500)
+  c_atk  : Uniform(10, 30)
+  c_def  : Uniform(10, 30)
+  B_def  : 75
+  B_atk  : 125
+  Random seed: 42 (for full reproducibility)
 """
-
 from __future__ import annotations
 
-import argparse
-import sys
-from pathlib import Path
+import random
+import time
+from typing import List
 
-# Allow running from the repo root without installing
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from data.generator import draw_attack_graph, generate_attack_graph
-from model.paper_exact_ccg import run_ccg_algorithm, run_heuristic_greedy, run_heuristic_lp
-from model.bilevel import solve_bilevel_small
+from model.attack_graph import AttackGraph
+from model.paper_algorithm import run_paper_algorithm
+from model.model_callbacks import run_callbacks
+from model.model_no_callbacks import run_no_callbacks
 
 
-# Convergence plot
 
-def plot_convergence(
-    lower_bounds: list[float],
-    upper_bounds: list[float],
-    title: str = "CCG Convergence",
-    save_path: str | None = None,
-) -> None:
+# Instance generator
+
+
+def build_paper_instance(
+    n_nodes: int = 50,
+    n_levels: int = 5,
+    pd: float = 0.25,   # inter-level arc probability (tuned for ~2.15x arcs)
+    ps: float = 0.03,   # intra-level arc probability
+    seed: int = 42,
+) -> AttackGraph:
     """
-    Plot lower and upper bounds vs. iteration number.
+    Generate a synthetic attack graph matching the paper's experimental setup.
 
-    This reproduces Figure 3 of the paper: the two curves start apart
-    and converge to the optimal value as new attack paths are added.
+    The graph uses a hierarchical topology:
+      - Level 0         : vulnerability (source) nodes  → all connect to node 0
+      - Levels 1..L-2   : transition nodes
+      - Level L-1       : goal nodes (non-zero reward)
+
+    A virtual source node 0 is added and connected to all vulnerability nodes.
+
+    Parameters
+    ----------
+    n_nodes  : total number of domain nodes (excluding virtual source)
+    n_levels : number of levels in the hierarchy
+    pd       : probability of an arc between adjacent levels
+    ps       : probability of an arc within the same level
+    seed     : random seed
+
+    Returns
+    -------
+    graph : populated AttackGraph
     """
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print("matplotlib not installed — skipping convergence plot.")
-        return
+    rng = random.Random(seed)
 
-    iterations = list(range(1, len(lower_bounds) + 1))
+    graph = AttackGraph()
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(iterations, lower_bounds, "b-o", label="Lower bound (master)", linewidth=2)
-    ax.plot(iterations, upper_bounds, "r-s", label="Upper bound (subproblem)", linewidth=2)
+    # Divide n_nodes into levels as evenly as possible
+    base = n_nodes // n_levels
+    remainder = n_nodes % n_levels
+    level_sizes: List[int] = []
+    start = 1  # node IDs start at 1; 0 is the virtual source
+    levels: List[List[int]] = []
 
-    if lower_bounds and upper_bounds:
-        opt = upper_bounds[-1]
-        ax.axhline(y=opt, color="gray", linestyle="--", linewidth=1, label=f"Optimal = {opt:.2f}")
+    for lvl in range(n_levels):
+        size = base + (1 if lvl < remainder else 0)
+        node_ids = list(range(start, start + size))
+        levels.append(node_ids)
+        start += size
 
-    ax.set_xlabel("CCG Iteration", fontsize=12)
-    ax.set_ylabel("Breach Loss", fontsize=12)
-    ax.set_title(title, fontsize=13, fontweight="bold")
-    ax.legend(fontsize=11)
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
+    vulnerability_nodes = levels[0]
+    goal_nodes = levels[-1]
+    transition_nodes = [n for lvl in levels[1:-1] for n in lvl]
 
-    if save_path:
-        plt.savefig(save_path, dpi=150)
-        print(f"Convergence plot saved to {save_path}")
-    else:
-        plt.show()
-    plt.close(fig)
+    # Add virtual source node 0 (no reward, no cost)
+    graph.add_node(0, reward=0.0)
+
+    # Add domain nodes
+    for lvl_idx, level in enumerate(levels):
+        for node_id in level:
+            if lvl_idx == n_levels - 1:
+                # Goal node: assign reward ~ Uniform(500, 1500)
+                reward = rng.uniform(500, 1500)
+            else:
+                reward = 0.0
+            graph.add_node(node_id, reward=reward)
+
+    # Virtual source arcs: 0 -> each vulnerability node
+    for v in vulnerability_nodes:
+        c_atk = rng.uniform(10, 30)
+        c_def = rng.uniform(10, 30)
+        graph.add_arc(0, v, cost_attack=c_atk, cost_interdict=c_def)
+
+    # Inter-level arcs (level l -> level l+1)
+    for lvl in range(n_levels - 1):
+        for tail in levels[lvl]:
+            for head in levels[lvl + 1]:
+                if rng.random() < pd:
+                    c_atk = rng.uniform(10, 30)
+                    c_def = rng.uniform(10, 30)
+                    graph.add_arc(tail, head, cost_attack=c_atk, cost_interdict=c_def)
+
+    # Intra-level arcs (within same level, only transition/goal)
+    for lvl in range(1, n_levels):
+        for i, tail in enumerate(levels[lvl]):
+            for head in levels[lvl]:
+                if tail != head and rng.random() < ps:
+                    c_atk = rng.uniform(10, 30)
+                    c_def = rng.uniform(10, 30)
+                    graph.add_arc(tail, head, cost_attack=c_atk, cost_interdict=c_def)
+
+    # Guarantee every transition/goal node has at least one incoming arc
+    all_domain = [n for level in levels for n in level]
+    for lvl_idx in range(1, n_levels):
+        for node_id in levels[lvl_idx]:
+            has_incoming = any(j == node_id for (_, j) in graph.arcs)
+            if not has_incoming:
+                # Pick a random node from any prior level
+                prior_nodes = [n for lvl in levels[:lvl_idx] for n in lvl]
+                tail = rng.choice(prior_nodes)
+                c_atk = rng.uniform(10, 30)
+                c_def = rng.uniform(10, 30)
+                graph.add_arc(tail, node_id, cost_attack=c_atk, cost_interdict=c_def)
+
+    return graph
 
 
-# Comparison table printer
 
-def print_comparison(
-    ccg_loss: float, ccg_iter: int, ccg_time: float,
-    lp_loss:  float, lp_gap:   float, lp_time:  float,
-    gr_loss:  float, gr_gap:   float, gr_time:  float,
-    exact_loss: float | None = None,
-) -> None:
-    sep = "=" * 62
-    print(f"\n{sep}")
-    print(f"{'Method':<22} {'Breach Loss':>11} {'Gap%':>7} {'Time (s)':>9} {'Iter':>5}")
-    print("-" * 62)
-    print(f"{'Exact CCG':<22} {ccg_loss:>11.4f} {'—':>7} {ccg_time:>9.3f} {ccg_iter:>5}")
-    print(f"{'LP heuristic':<22} {lp_loss:>11.4f} {lp_gap*100:>6.2f}% {lp_time:>9.3f} {'—':>5}")
-    print(f"{'Greedy heuristic':<22} {gr_loss:>11.4f} {gr_gap*100:>6.2f}% {gr_time:>9.3f} {'—':>5}")
-    if exact_loss is not None:
-        print("-" * 62)
-        print(f"{'Bilevel MIP (exact)':<22} {exact_loss:>11.4f} {'—':>7} {'—':>9} {'—':>5}")
-    print(f"{sep}\n")
+# Pretty-print table
+
+
+def _print_table(results: list) -> None:
+    """Print a formatted comparison table of the three models."""
+    col_names = [
+        "Model",
+        "Breach Loss",
+        "Runtime (s)",
+        "Iterations",
+        "Interdicted Arcs",
+    ]
+    col_widths = [30, 14, 14, 12, 18]
+
+    sep = "+" + "+".join("-" * w for w in col_widths) + "+"
+    header = "|" + "|".join(
+        f" {name:<{w-2}} " for name, w in zip(col_names, col_widths)
+    ) + "|"
+
+    print("\n" + sep)
+    print(header)
+    print(sep)
+    for row in results:
+        line = "|" + "|".join(
+            f" {str(val):<{w-2}} " for val, w in zip(row, col_widths)
+        ) + "|"
+        print(line)
+    print(sep)
+
 
 
 # Main
 
+
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Solve a single attack-graph interdiction instance."
+    print("=" * 60)
+    print("  Attack-Graph Interdiction Benchmark")
+    print("  Nandi, Medal, Vadlamani (2016) - COR 75, 118-131")
+    print("=" * 60)
+
+    # Build instance
+    print("\n[Instance] Building graph (50 nodes, 5 levels, seed=42) ...")
+    graph = build_paper_instance(
+        n_nodes=50,
+        n_levels=5,
+        seed=42,
     )
-    parser.add_argument("--L",      type=int,   default=3,  help="Number of levels (default 3)")
-    parser.add_argument("--W",      type=int,   default=3,  help="Nodes per level (default 3)")
-    parser.add_argument("--d",      type=int,   default=2,  help="Out-degree per node (default 2)")
-    parser.add_argument("--B_def",  type=float, default=10, help="Defender budget (default 10)")
-    parser.add_argument("--B_att",  type=float, default=15, help="Attacker budget (default 15)")
-    parser.add_argument("--seed",   type=int,   default=42, help="Random seed (default 42)")
-    parser.add_argument("--validate", action="store_true",
-                        help="Also solve with small bilevel MIP for validation.")
-    parser.add_argument("--draw",   action="store_true",
-                        help="Draw the attack graph before solving.")
-    parser.add_argument("--save_plot", metavar="PATH",
-                        help="Save convergence plot to file instead of showing it.")
-    parser.add_argument("--no_plot", action="store_true",
-                        help="Skip convergence plot entirely.")
-    args = parser.parse_args()
+    n_arcs = len(graph.arcs)
+    n_nodes = len(graph.nodes)
+    B_def = 75.0
+    B_atk = 125.0
 
-    # Generate instance
-    print(f"\nGenerating attack graph: L={args.L}, W={args.W}, d={args.d}, seed={args.seed}")
-    graph = generate_attack_graph(L=args.L, W=args.W, d=args.d, seed=args.seed)
-    print(graph.summary())
-    print(f"  Defender budget : {args.B_def}")
-    print(f"  Attacker budget : {args.B_att}")
-    print(f"  All paths       : {len(graph.get_all_paths())}")
+    print(f"  Nodes (incl. virtual source) : {n_nodes}")
+    print(f"  Arcs                         : {n_arcs}")
+    print(f"  Defender budget              : {B_def}")
+    print(f"  Attacker budget              : {B_atk}")
 
-    if args.draw:
-        draw_attack_graph(
-            graph,
-            title=f"Attack Graph (L={args.L}, W={args.W}, d={args.d})",
-        )
+    results = []
 
-    # Solve with all three methods
-    print("\nSolving with Exact CCG ...")
-    res_ccg = run_ccg_algorithm(graph, args.B_def, args.B_att)
-
-    print("Solving with LP heuristic ...")
-    res_lp  = run_heuristic_lp(graph, args.B_def, args.B_att)
-
-    print("Solving with Greedy heuristic ...")
-    res_gr  = run_heuristic_greedy(graph, args.B_def, args.B_att)
-
-    # Optional: validate with small bilevel MIP
-    exact_loss = None
-    if args.validate:
-        print("Solving with bilevel MIP (validation) ...")
-        exact_loss, _, n_paths = solve_bilevel_small(graph, args.B_def, args.B_att)
-        print(f"  Bilevel MIP: breach_loss={exact_loss:.4f}, paths enumerated={n_paths}")
-
-    # Print comparison table
-    print_comparison(
-        ccg_loss=res_ccg.breach_loss,
-        ccg_iter=res_ccg.n_iterations,
-        ccg_time=res_ccg.solve_time_s,
-        lp_loss=res_lp.breach_loss,
-        lp_gap=res_lp.optimality_gap,
-        lp_time=res_lp.solve_time_s,
-        gr_loss=res_gr.breach_loss,
-        gr_gap=res_gr.optimality_gap,
-        gr_time=res_gr.solve_time_s,
-        exact_loss=exact_loss,
+    
+    # Model 1 - Paper MINMAX (MINBREACHPATH + MAXBREACH)
+    
+    print("\n[Model 1] Running MINMAX algorithm (paper exact) ...")
+    t_start = time.time()
+    loss1, interdict1, rt1, iters1 = run_paper_algorithm(
+        graph, B_def, B_atk, epsilon=1e-4, solver_msg=False
     )
+    interdicted1 = sum(1 for v in interdict1.values() if v == 1)
+    print(f"  Done. Loss={loss1:.2f}  Time={rt1:.2f}s  Iters={iters1}")
+    results.append([
+        "Model 1 - Paper MINMAX",
+        f"{loss1:.2f}",
+        f"{rt1:.2f}",
+        iters1,
+        interdicted1,
+    ])
 
-    # Print optimal interdiction plan
-    interdicted = [arc for arc, v in res_ccg.x_optimal.items() if v == 1]
-    print(f"Optimal interdiction plan (CCG): {interdicted}")
-    print(f"CCG converged in {res_ccg.n_iterations} iteration(s)\n")
+    
+    # Model 2 - Gurobi Callbacks (refactored new.py)
+    
+    print("\n[Model 2] Running Gurobi callbacks model (new.py) ...")
+    loss2, interdict2, rt2 = run_callbacks(
+        graph, B_def, B_atk, solver_msg=False
+    )
+    interdicted2 = sum(1 for v in interdict2.values() if v == 1)
+    print(f"  Done. Loss={loss2:.2f}  Time={rt2:.2f}s")
+    results.append([
+        "Model 2 - Gurobi Callbacks",
+        f"{loss2:.2f}",
+        f"{rt2:.2f}",
+        "N/A (1 outer solve)",
+        interdicted2,
+    ])
 
-    # Convergence plot
-    if not args.no_plot:
-        plot_convergence(
-            res_ccg.lower_bounds,
-            res_ccg.upper_bounds,
-            title=f"CCG Convergence  (L={args.L}, W={args.W}, d={args.d})",
-            save_path=args.save_plot,
-        )
+    
+    # Model 3 - No Callbacks iterative (refactored new_Gurobi_no_callbacks.py)
+    
+    print("\n[Model 3] Running iterative no-callbacks model ...")
+    loss3, interdict3, rt3, iters3 = run_no_callbacks(
+        graph, B_def, B_atk, epsilon=1e-4, solver_msg=False
+    )
+    interdicted3 = sum(1 for v in interdict3.values() if v == 1)
+    print(f"  Done. Loss={loss3:.2f}  Time={rt3:.2f}s  Iters={iters3}")
+    results.append([
+        "Model 3 - Iterative No-Callbacks",
+        f"{loss3:.2f}",
+        f"{rt3:.2f}",
+        iters3,
+        interdicted3,
+    ])
+
+    
+    # Print summary table
+    
+    print("\n" + "=" * 60)
+    print("  PERFORMANCE COMPARISON")
+    print("=" * 60)
+    _print_table(results)
+
+    print("\nColumn descriptions:")
+    print("  Breach Loss      : Optimal worst-case attacker reward (lower = better defence)")
+    print("  Runtime (s)      : Total wall-clock time in seconds")
+    print("  Iterations       : Number of master/sub-problem iterations (outer loop cycles)")
+    print("  Interdicted Arcs : Number of arcs chosen for protection by the defender")
+    print()
 
 
 if __name__ == "__main__":
