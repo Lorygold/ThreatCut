@@ -20,11 +20,11 @@ Two callback events are exploited:
                             added here is valid but not necessarily tight -
                             it strengthens the LP bound and prunes more nodes.
 
-which introduces the auxiliary variable w_{ijk} to handle the correction
+The model introduces the auxiliary variable w_{ijk} to handle the correction
 factor when two consecutive arcs (i,j) and (j,k) are both interdicted,
-avoiding the double-counting of the interdiction effect in the Benders cut.
+avoiding double-counting of the interdiction effect in the Benders cut.
 
-Implementation suggested by Roberto Montemanni
+Implementation suggested by Roberto Montemanni.
 """
 
 from __future__ import annotations
@@ -37,191 +37,198 @@ from gurobipy import GRB
 from model.attack_graph import AttackGraph
 
 
-# Module-level globals used inside the callback.
-# Gurobi callbacks cannot receive extra arguments, so shared state is stored
-# at module level.  This is the standard pattern for Gurobi callbacks in Python.
 
-_prob: gp.Model          # outer (defender) Gurobi model
-_y: Dict                 # outer binary interdiction variables y[i,j]
-_w: Dict                 # outer auxiliary variables w[i,j,k]
-_z: gp.Var              # outer continuous variable z (worst-case attacker profit)
-_arcs: list              # list of arc tuples (i, j)
-_graph: AttackGraph      # attack graph (read-only inside callback)
-_B_attacker: float       # attacker budget (read-only inside callback)
-_M: float                # big-M = sum of all goal node rewards
+# Module-level shared state for the outer callback.
+# Gurobi callbacks cannot receive extra arguments - storing state at module
+# level is the standard pattern for Gurobi callbacks in Python.
 
-def inner_callback(model: gp.Model, where: int) -> None: # RM
-    global _prob, _y, _w, _z
-    
-    global u,v,free_arcs2 # RM
+_prob:      gp.Model        # outer (defender) Gurobi model
+_y:         Dict            # outer binary interdiction variables y[i,j]
+_w:         Dict            # outer auxiliary variables w[i,j,k]
+_z:         gp.Var          # outer continuous variable z (worst-case attacker profit)
+_arcs:      list            # list of arc tuples (i, j)
+_graph:     AttackGraph     # attack graph (read-only inside callback)
+_B_attacker: float          # attacker budget (read-only inside callback)
+_M:         float           # big-M = sum of all goal node rewards
+_L:         int             # number of levels (for valid inequality)
+_W:         int             # nodes per level (for valid inequality)
+
+# Inner-problem variables - set by _solve_inner_and_add_cut, read by _inner_callback.
+_u:         Dict            # inner u[i,j] variables
+_v:         gp.Var          # inner v variable
+_free_arcs: list            # free arcs for the current inner solve
+
+
+
+# Inner callback: fires when the inner MIP finds a new integer solution
+
+
+def _inner_callback(model: gp.Model, where: int) -> None:
+    """
+    Gurobi callback for the INNER (attacker) MIP.
+
+    At every integer solution of the inner problem (MIPSOL), immediately
+    add the corresponding Benders cut to the OUTER model via cbLazy().
+
+    This is the key design: cuts are generated at every integer feasible
+    solution of the inner MIP, not only at its optimum, tightening the
+    outer model much faster.
+    """
+    global _prob, _y, _w, _z, _u, _v, _free_arcs
+
     if where == GRB.Callback.MIPSOL:
-    # --- Add Benders cut as lazy constraint ---
-    # The cut tightens z from below: the outer z must be at least as large
-    # as the attacker's profit under any valid interdiction plan.
         _prob.cbLazy(
-            _z >= model.cbGetSolution(v)
-            # Subtract profit lost due to interdicted arcs
-            - gp.quicksum(model.cbGetSolution(u[i, j]) * _y[i, j] for (i, j) in free_arcs2)
-            # Correction: add back the over-counted reduction for consecutive interdictions
+            _z >= model.cbGetSolution(_v)
+            - gp.quicksum(
+                model.cbGetSolution(_u[i, j]) * _y[i, j]
+                for (i, j) in _free_arcs
+            )
             + gp.quicksum(
-                model.cbGetSolution(u[j, k]) * _w[i, j, k]
-                for (i, j) in free_arcs2
-                for (l, k) in free_arcs2 if j == l
+                model.cbGetSolution(_u[j, k]) * _w[i, j, k]
+                for (i, j) in _free_arcs
+                for (l, k) in _free_arcs if j == l
             )
         )
 
+
+
+# Solve inner and inject Benders cut (called from the outer callback)
+
 def _solve_inner_and_add_cut(free_arcs: list) -> None:
     """
-    Solve the attacker's inner problem on the set of non-interdicted arcs
-    and add the resulting Benders cut as a lazy constraint to the outer model.
+    Build and solve the attacker inner MIP for the given free-arc set, then
+    add the Benders cut to the outer model via cbLazy().
 
-    This function is called from within the Gurobi callback, so it uses
-    _prob.cbLazy() to add the cut rather than _prob.addConstr().
+    The inner MIP is solved with its own callback (_inner_callback), so cuts
+    are generated at every integer feasible solution of the inner problem.
 
-    The Benders cut has the form (equation 4 in the course notes):
+    The Benders cut has the form:
 
-        z >= v^p
-             - sum_{(i,j) in F} u^p_{ij} * y_{ij}
-             + sum_{(i,j),(j,k) in F} u^p_{jk} * w_{ijk}
+        z >= v* - sum_{(i,j) in F} u*_{ij} * y_{ij}
+                + sum_{(i,j),(j,k) in F} u*_{jk} * w_{ijk}
 
-    where:
-        v^p   = optimal inner objective (attacker profit with no interdiction)
-        u^p   = optimal profit values on each arc in the inner solution
-        F     = set of arcs NOT interdicted by the current outer solution
+    where F is the set of arcs not interdicted by the current outer solution,
+    v* is the inner objective value, and u* are the arc profit variables.
 
-    The correction term with w_{ijk} compensates for the fact that when two
-    consecutive arcs (i,j) and (j,k) are BOTH interdicted, the term
-    u^p_{ij} * y_{ij} would remove the profit on arc (i,j), but that profit
-    was already zero because (j,k) is also cut - so we would subtract too much.
-    The w term adds back this over-counted reduction.
+    The w correction term compensates for double-counting: when two consecutive
+    arcs (i,j) and (j,k) are both interdicted, the term -u*_{ij}*y_{ij} already
+    removes (i,j)'s contribution, but also incorrectly removes the downstream
+    profit flowing through j. The +u*_{jk}*w_{ijk} term adds it back.
 
     Parameters
     ----------
-    free_arcs : list of (i, j) tuples
-        Arcs that are NOT interdicted in the current outer solution
-        (i.e., arcs where y_{ij} = 0).
+    free_arcs : list of (i, j) tuples - arcs where y_{ij} = 0
     """
-    global u,v,free_arcs2 # RM
-    free_arcs2=free_arcs # RM
+    global _u, _v, _free_arcs
+    _free_arcs = free_arcs
 
-    # Build the inner (attacker) problem
     inner = gp.Model("inner")
-    inner.Params.OutputFlag = 0  # silence inner solver output
-    inner.Params.LazyConstraints = 1 # RM
-    
-    # --- Inner decision variables ---
-    # x[i,j] = 1 if the attacker uses arc (i,j) in the attack plan
-    x = {(i, j): inner.addVar(vtype=GRB.BINARY, name=f"x_{i}_{j}")
-         for (i, j) in free_arcs}
+    inner.Params.OutputFlag = 0
 
-    # u[i,j] = profit carried along arc (i,j) in the attack plan
-    # This flows rewards from goal nodes back towards the root, following
-    # the active arborescence structure.
-    u = {(i, j): inner.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"u_{i}_{j}")
-         for (i, j) in free_arcs}
+    x = {(i, j): inner.addVar(vtype=GRB.BINARY,     name=f"x_{i}_{j}") for (i, j) in free_arcs}
+    _u = {(i, j): inner.addVar(vtype=GRB.CONTINUOUS, name=f"u_{i}_{j}") for (i, j) in free_arcs}
+    _v = inner.addVar(lb=0.0, vtype=GRB.CONTINUOUS, name="v")
 
-    # v = total profit collected at the root (objective variable)
-    v = inner.addVar(lb=0.0, vtype=GRB.CONTINUOUS, name="v")
+    inner.setObjective(_v, GRB.MAXIMIZE)
 
-    # --- Objective: maximise total profit collected at root node (id=0) ---
-    inner.setObjective(v, GRB.MAXIMIZE)
-
-    # --- Constraints ---
-
-    # Total profit collected at root = sum of profits on arcs leaving root
+    # Total profit at root = sum of u on arcs leaving node 0
     inner.addConstr(
-        v == gp.quicksum(u[i, j] for (i, j) in free_arcs if i == 0),
-        name="root_profit"
+        _v == gp.quicksum(_u[i, j] for (i, j) in free_arcs if i == 0),
+        name="root_profit",
     )
 
-    # Attacker budget: total cost of arcs used must not exceed B_a
+    # Attacker budget
     inner.addConstr(
-        gp.quicksum(_graph.arcs[i, j].cost_attack * x[i, j]
-                    for (i, j) in free_arcs) <= _B_attacker,
-        name="attacker_budget"
+        gp.quicksum(_graph.arcs[i, j].cost_attack * x[i, j] for (i, j) in free_arcs)
+        <= _B_attacker,
+        name="attacker_budget",
     )
 
-    # Arborescence constraint: at most one arc can enter each non-root node.
-    # This ensures the attack plan forms a tree rooted at node 0.
+    # Arborescence: at most one incoming arc per node
     for node_id in _graph.nodes:
         in_arcs = [(i, j) for (i, j) in free_arcs if j == node_id]
         if in_arcs:
             inner.addConstr(
                 gp.quicksum(x[i, j] for (i, j) in in_arcs) <= 1,
-                name=f"arborescence_{node_id}"
+                name=f"arborescence_{node_id}",
             )
 
-    # Profit propagation along the arborescence
+    # Profit propagation
     for (i, j) in free_arcs:
-        # u[i,j] can be non-zero only if arc (i,j) is active (big-M bound)
-        inner.addConstr(u[i, j] <= _M * x[i, j], name=f"bigM_{i}_{j}")
-
+        inner.addConstr(_u[i, j] <= _M * x[i, j], name=f"bigM_{i}_{j}")
         if _graph.nodes[j].reward > 0:
-            # Node j is a goal node: profit on arc entering j is capped at r_j
             inner.addConstr(
-                u[i, j] <= _graph.nodes[j].reward * x[i, j],
-                name=f"goal_reward_{i}_{j}"
+                _u[i, j] <= _graph.nodes[j].reward * x[i, j],
+                name=f"goal_reward_{i}_{j}",
             )
         else:
-            # Intermediate node: profit flows forward from j to its successors
-            out_arcs = [(l, k) for (l, k) in free_arcs if l==j] # RM Attenzione qui: vanno presi solo gli archi uscenti da j!
+            out_arcs = [(l, k) for (l, k) in free_arcs if l == j]
             if out_arcs:
                 inner.addConstr(
-                    u[i, j] <= gp.quicksum(u[j, k] for (j, k) in out_arcs),
-                    name=f"flow_fwd_{i}_{j}"
+                    _u[i, j] <= gp.quicksum(_u[j, k] for (j, k) in out_arcs),
+                    name=f"flow_fwd_{i}_{j}",
                 )
-        for l in range(L): # RM this is a valid inequality to speed up computation. Is it really necessary to use W or we have a "nodes in a certain level" concept?
-            idx=1+(l-1)*W
-            idx2=1+(l)*W
-            inner.addConstr(gp.quicksum(u[i,j] for i in range(idx,idx+W)for j in range(idx2,idx2+W) if (i,j) in x)==v)
-            
-    inner.optimize(inner_callback) # RM
 
+    # Valid inequality: total flow crossing each inter-level cut equals v.
+    # Applied once per level, not once per arc.
+    # Only meaningful for regular L×W graphs (skip when _L or _W is 0).
+    if _L > 0 and _W > 0:
+        for l in range(_L):
+            idx  = 1 + (l - 1) * _W
+            idx2 = 1 + l * _W
+            inner.addConstr(
+                gp.quicksum(
+                    _u[i, j]
+                    for i in range(idx,  idx  + _W)
+                    for j in range(idx2, idx2 + _W)
+                    if (i, j) in x
+                ) == _v,
+                name=f"level_flow_{l}",
+            )
+
+    # Solve inner with its own callback so cuts fire at every integer solution
+    inner.optimize(_inner_callback)
     inner.dispose()
 
 
+
+# Outer callback
+
 def _callback(model: gp.Model, where: int) -> None:
     """
-    Gurobi callback function.
+    Outer Gurobi callback.
 
-    Called by Gurobi at various points during the B&B solve.
-    We intercept two events:
-
-    MIPSOL  - a new integer-feasible outer solution has been found.
-              The inner problem is solved on the exact interdiction plan,
-              and a tight Benders cut is added.
-
-    MIPNODE - the LP relaxation at a B&B node has been solved to optimality.
-              The inner problem is solved on the fractionally-relaxed plan
-              (arcs with LP value < epsilon are treated as non-interdicted),
-              and a valid (but possibly not tight) cut is added to strengthen
-              the LP relaxation bound.
+    MIPSOL  - new integer-feasible outer solution: solve inner on exact y values.
+    MIPNODE - optimal LP relaxation at B&B node: solve inner on fractional y values
+              (arcs with value < 0.1 treated as non-interdicted).
     """
     if where == GRB.Callback.MIPSOL:
-        # Extract arcs NOT interdicted in the current integer solution
         free = [
             (i, j) for (i, j) in _arcs
-            if _prob.cbGetSolution(_y[i, j]) < 1e-1 # RM era rischioso a 1e-7 (my fault)
+            if model.cbGetSolution(_y[i, j]) < 0.1
         ]
         _solve_inner_and_add_cut(free)
 
-    elif (where == GRB.Callback.MIPNODE and
-          _prob.cbGet(GRB.Callback.MIPNODE_STATUS) == GRB.OPTIMAL):
-        # Extract arcs NOT interdicted in the LP relaxation at this B&B node
-        # (fractional values close to 0 are treated as "not interdicted")
+    elif (
+        where == GRB.Callback.MIPNODE
+        and model.cbGet(GRB.Callback.MIPNODE_STATUS) == GRB.OPTIMAL
+    ):
         free = [
             (i, j) for (i, j) in _arcs
-            if _prob.cbGetNodeRel(_y[i, j]) < 1e-1 # RM era rischioso a 1e-7 (my fault)
+            if model.cbGetNodeRel(_y[i, j]) < 0.1
         ]
         _solve_inner_and_add_cut(free)
 
+
+
+# Public entry point
 
 def run_new_callbacks(
     graph: AttackGraph,
     B_defender: float,
     B_attacker: float,
-    Lp: int, # RM qui va gestito meglio...
-    Wp: int, # RM qui va gestito meglio...
+    Lp: int,
+    Wp: int,
     solver_msg: bool = False,
 ) -> Tuple[float, float]:
     """
@@ -234,16 +241,18 @@ def run_new_callbacks(
     B&B tree as a lazy constraint.
 
     This is more efficient than the sequential loop approach because:
-    - Cuts are added throughout the B&B tree, not just at the root
-    - Gurobi can exploit the tighter bounds to prune more branches
-    - No re-solving from scratch at each iteration
+      - Cuts are added throughout the B&B tree, not just at the root.
+      - Gurobi can exploit the tighter bounds to prune more branches.
+      - No re-solving from scratch at each iteration.
 
     Parameters
     ----------
-    graph       : AttackGraph
-    B_defender  : float  Defender's interdiction budget.
-    B_attacker  : float  Attacker's traversal budget.
-    solver_msg  : bool   Show Gurobi output if True.
+    graph      : AttackGraph
+    B_defender : float  Defender's interdiction budget.
+    B_attacker : float  Attacker's traversal budget.
+    Lp         : int    Number of levels (used for valid inequality).
+    Wp         : int    Nodes per level (used for valid inequality).
+    solver_msg : bool   Show Gurobi output if True.
 
     Returns
     -------
@@ -251,79 +260,46 @@ def run_new_callbacks(
         breach_loss : optimal worst-case attacker profit after interdiction
         runtime_s   : Gurobi wall-clock solve time in seconds
     """
-    global _prob, _y, _w, _z, _arcs, _graph, _B_attacker, _M,L,W # RM
-    L=Lp; W=Wp # RM
-    # Store shared state for the callback
-    _graph = graph
+    global _prob, _y, _w, _z, _arcs, _graph, _B_attacker, _M, _L, _W
+
+    _graph      = graph
     _B_attacker = B_attacker
-    _arcs = list(graph.arcs.keys())
-
-    # big-M = sum of all goal node rewards (maximum possible attacker profit)
-    _M = sum(n.reward for n in graph.nodes.values())
-
-    # Build the outer (defender) problem
+    _arcs       = list(graph.arcs.keys())
+    _M          = sum(n.reward for n in graph.nodes.values())
+    _L          = Lp
+    _W          = Wp
 
     _prob = gp.Model("outer_callback")
-    _prob.Params.OutputFlag = 1# if solver_msg else 0
-    # REQUIRED: lazy constraints can only be added via callbacks when this
-    # parameter is enabled.
-    _prob.Params.LazyConstraints = 1
+    _prob.Params.OutputFlag    = 1 if solver_msg else 0
+    _prob.Params.LazyConstraints = 1   # required for cbLazy
 
-    # --- Outer decision variables ---
-    # y[i,j] = 1 if the defender interdicts arc (i,j)
-    _y = {(i, j): _prob.addVar(vtype=GRB.BINARY, name=f"y_{i}_{j}")
-          for (i, j) in _arcs}
-
-    # w[i,j,k] = 1 if BOTH arcs (i,j) AND (j,k) are interdicted.
-    # Used as a correction factor in the Benders cut to avoid
-    # double-counting when two consecutive arcs are blocked.
+    _y = {(i, j): _prob.addVar(vtype=GRB.BINARY,     name=f"y_{i}_{j}") for (i, j) in _arcs}
     _w = {
         (i, j, k): _prob.addVar(vtype=GRB.BINARY, name=f"w_{i}_{j}_{k}")
         for (i, j) in _arcs
         for (l, k) in _arcs if j == l
     }
-
-    # z = worst-case attacker profit (the variable we minimise)
     _z = _prob.addVar(lb=0.0, vtype=GRB.CONTINUOUS, name="z")
 
-    # --- Objective ---
     _prob.setObjective(_z, GRB.MINIMIZE)
 
-    # --- Constraints ---
-
-    # Defender budget
     _prob.addConstr(
-        gp.quicksum(graph.arcs[i, j].cost_interdict * _y[i, j]
-                    for (i, j) in _arcs) <= B_defender,
-        name="defender_budget"
+        gp.quicksum(graph.arcs[i, j].cost_interdict * _y[i, j] for (i, j) in _arcs)
+        <= B_defender,
+        name="defender_budget",
     )
 
-    # w alignment: w[i,j,k] = 1 whenever BOTH y[i,j]=1 AND y[j,k]=1.
-    # Equivalently: w[i,j,k] >= y[i,j] + y[j,k] - 1
-    
-    # RM Qui aggiunti 2 vincoli
-    
     for (i, j) in _arcs:
         for (l, k) in _arcs:
             if l == j:
-                _prob.addConstr(
-                    _w[i, j, k] >= _y[i, j] + _y[j, k] - 1,
-                    name=f"w_align_{i}_{j}_{k}"
-                )
-                _prob.addConstr( # RM
-                    _w[i, j, k] <= _y[i, j],
-                    name=f"w_align_{i}_{j}"
-                )
-                _prob.addConstr( # RM
-                    _w[i, j, k] <= _y[j, k],
-                    name=f"w_align_{j}_{k}"
-                )
+                _prob.addConstr(_w[i, j, k] >= _y[i, j] + _y[j, k] - 1, name=f"w_align_{i}_{j}_{k}")
+                _prob.addConstr(_w[i, j, k] <= _y[i, j],                  name=f"w_align_ij_{i}_{j}_{k}")
+                _prob.addConstr(_w[i, j, k] <= _y[j, k],                  name=f"w_align_jk_{i}_{j}_{k}")
 
-    # Solve with callback
     _prob.optimize(_callback)
 
     breach_loss = _z.X
-    runtime_s = _prob.Runtime
+    runtime_s   = _prob.Runtime
 
     print(f"Optimal breach loss: {breach_loss:.4f}  |  Runtime: {runtime_s:.3f}s")
 
