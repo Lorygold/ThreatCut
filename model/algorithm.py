@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import pulp
 
@@ -64,7 +64,7 @@ class CCGResult:
     optimality_gap: float = 0.0
 
 
-# CCG — exact algorithm
+# CCG - exact algorithm
 
 def run_ccg_algorithm(
     graph: AttackGraph,
@@ -147,7 +147,7 @@ def run_ccg_algorithm(
     )
 
 
-# Heuristic 1 — LP relaxation of master (one-node B&B)
+# Heuristic 1 - LP relaxation of master (one-node B&B)
 
 def run_heuristic_lp(
     graph: AttackGraph,
@@ -222,7 +222,7 @@ def run_heuristic_lp(
     )
 
 
-# Heuristic 2 — greedy master
+# Heuristic 2 - greedy master
 
 def run_heuristic_greedy(
     graph: AttackGraph,
@@ -236,7 +236,7 @@ def run_heuristic_greedy(
     CCG heuristic: replace the master entirely with a greedy arc selection.
 
     At each iteration the defender greedily interdicts arcs in order of
-    decreasing  (cost_interdict / cost_attack) ratio — i.e. arcs that are
+    decreasing  (cost_interdict / cost_attack) ratio - i.e. arcs that are
     cheap to block but expensive for the attacker to traverse.
 
     Much faster than the exact master but typically gives a larger gap.
@@ -259,7 +259,7 @@ def run_heuristic_greedy(
         )
 
         # Lower bound: use the subproblem value as a proxy
-        # (greedy does not produce a proper LB — record 0)
+        # (greedy does not produce a proper LB - record 0)
         lb = 0.0
         lower_bounds.append(lb)
         upper_bounds.append(ub)
@@ -270,7 +270,7 @@ def run_heuristic_greedy(
                 paths.append(path)
                 added = True
 
-        # Re-run greedy with the same budget (plan does not change —
+        # Re-run greedy with the same budget (plan does not change -
         # this heuristic converges in 1 iteration by design)
         if not added or iteration > 1:
             break
@@ -359,7 +359,7 @@ def _solve_master(
         if goal_id is None:
             continue
         if graph.path_cost_attack(path) > B_attacker:
-            continue   # path is not affordable — skip
+            continue   # path is not affordable - skip
 
         reward     = graph.nodes[goal_id].reward
         path_arcs  = graph.path_arcs(path)
@@ -410,7 +410,7 @@ def _greedy_interdict(
 ) -> Dict[Tuple[int, int], int]:
     """
     Pure greedy: sort arcs by cost_interdict / cost_attack (ascending)
-    — cheap-to-block, expensive-to-traverse arcs first.
+    - cheap-to-block, expensive-to-traverse arcs first.
     """
     arcs = list(graph.arcs.keys())
 

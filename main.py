@@ -1,5 +1,5 @@
 """
-main.py — Entry point for single-instance runs and convergence plots.
+main.py - Entry point for single-instance runs and convergence plots.
 
 Solves a single attack graph instance with the exact CCG algorithm and the
 two heuristics, prints a comparison table, and shows a convergence plot.
@@ -52,7 +52,7 @@ def plot_convergence(
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        print("matplotlib not installed — skipping convergence plot.")
+        print("matplotlib not installed - skipping convergence plot.")
         return
 
     iterations = list(range(1, len(lower_bounds) + 1))
@@ -92,12 +92,12 @@ def print_comparison(
     print(f"\n{sep}")
     print(f"{'Method':<22} {'Breach Loss':>11} {'Gap%':>7} {'Time (s)':>9} {'Iter':>5}")
     print("-" * 62)
-    print(f"{'Exact CCG':<22} {ccg_loss:>11.4f} {'—':>7} {ccg_time:>9.3f} {ccg_iter:>5}")
-    print(f"{'LP heuristic':<22} {lp_loss:>11.4f} {lp_gap*100:>6.2f}% {lp_time:>9.3f} {'—':>5}")
-    print(f"{'Greedy heuristic':<22} {gr_loss:>11.4f} {gr_gap*100:>6.2f}% {gr_time:>9.3f} {'—':>5}")
+    print(f"{'Exact CCG':<22} {ccg_loss:>11.4f} {'-':>7} {ccg_time:>9.3f} {ccg_iter:>5}")
+    print(f"{'LP heuristic':<22} {lp_loss:>11.4f} {lp_gap*100:>6.2f}% {lp_time:>9.3f} {'-':>5}")
+    print(f"{'Greedy heuristic':<22} {gr_loss:>11.4f} {gr_gap*100:>6.2f}% {gr_time:>9.3f} {'-':>5}")
     if exact_loss is not None:
         print("-" * 62)
-        print(f"{'Bilevel MIP (exact)':<22} {exact_loss:>11.4f} {'—':>7} {'—':>9} {'—':>5}")
+        print(f"{'Bilevel MIP (exact)':<22} {exact_loss:>11.4f} {'-':>7} {'-':>9} {'-':>5}")
     print(f"{sep}\n")
 
 
@@ -121,6 +121,8 @@ def main() -> None:
                         help="Save convergence plot to file instead of showing it.")
     parser.add_argument("--no_plot", action="store_true",
                         help="Skip convergence plot entirely.")
+    parser.add_argument("--solver_msg", action="store_true",
+                        help="Show Gurobi solver output.")
     args = parser.parse_args()
 
     # Generate instance
@@ -137,11 +139,11 @@ def main() -> None:
             title=f"Attack Graph (L={args.L}, W={args.W}, d={args.d})",
         )
 
-    run_new_callbacks(graph, args.B_def, args.B_att, args.L, args.W)
-    input('')
-    run_new_no_callbacks(graph, args.B_def, args.B_att, args.L, args.W)
-    input('')
-    # Solve with all three methods
+    # Gurobi models
+    run_new_callbacks(graph, args.B_def, args.B_att, args.L, args.W, solver_msg=args.solver_msg)
+    run_new_no_callbacks(graph, args.B_def, args.B_att, args.L, args.W, solver_msg=args.solver_msg)
+
+    # Solve with all three CCG methods
     print("\nSolving with Exact CCG ...")
     res_ccg = run_ccg_algorithm(graph, args.B_def, args.B_att)
 

@@ -11,7 +11,7 @@ This is the "subproblem" in the constraint-and-column generation loop
 (Algorithm 1 of the paper).  It is also used standalone to evaluate
 how much damage an optimal attacker can do against any fixed plan x.
 
-Formulation (Section 3.2 — MAXBREACHBM):
+Formulation (Section 3.2 - MAXBREACHBM):
 
     max   sum_{g in Goals} reward[g] * z[g]
 

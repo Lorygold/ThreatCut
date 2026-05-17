@@ -66,7 +66,7 @@ class AttackGraph:
 
         Internal state
         --------------
-        _graph       : empty DiGraph — nodes and arcs added via add_node / add_arc
+        _graph       : empty DiGraph - nodes and arcs added via add_node / add_arc
         _nodes       : dict mapping node_id -> Node dataclass
         _arcs        : dict mapping (src, dst) -> Arc dataclass
         _num_levels  : tracks the maximum level seen so far; updated in add_node
@@ -79,7 +79,7 @@ class AttackGraph:
 
     # Graph construction
 
-    def add_node(self, node_id: int, level: int, reward: int=0) -> None:
+    def add_node(self, node_id: int, level: int, reward: float = 0.0) -> None:
         """
         Add a node to the attack graph.
 
@@ -89,7 +89,7 @@ class AttackGraph:
             Unique integer identifier for the node.
         level   : int
             Hierarchy level.  0 = entry point, max level = goal.
-        reward  : int
+        reward  : float
             Reward for the attacker if this node is breached.
             Should be > 0 only for goal nodes (last level).
         """
@@ -141,12 +141,12 @@ class AttackGraph:
 
     @property
     def source_nodes(self) -> List[Node]:
-        """Nodes at level 0 — the attacker's entry points."""
+        """Nodes at level 0 - the attacker's entry points."""
         return [n for n in self._nodes.values() if n.level == 0]
 
     @property
     def goal_nodes(self) -> List[Node]:
-        """Nodes at the highest level — the critical assets to protect."""
+        """Nodes at the highest level - the critical assets to protect."""
         return [n for n in self._nodes.values() if n.level == self._num_levels]
 
     @property
@@ -221,7 +221,7 @@ class AttackGraph:
         Parameters
         ----------
         path : List[int]    sequence of node ids
-        x    : dict         interdiction plan — x[(i,j)] = 1 if arc is blocked
+        x    : dict         interdiction plan - x[(i,j)] = 1 if arc is blocked
         """
         return any(x.get((u, v), 0) == 1 for u, v in self.path_arcs(path))
 

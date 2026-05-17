@@ -12,12 +12,12 @@ and adding one constraint per path saying:
     L >= breach_reward(path, x)  if path is feasible for the attacker
 
 This is valid because the inner attacker problem, given x, is a maximisation
-over a finite set of paths — so the max equals the tightest lower bound on L.
+over a finite set of paths - so the max equals the tightest lower bound on L.
 
 Use this ONLY for validation on small instances (< ~20 nodes).
 For larger instances use the CCG algorithm in model/algorithm.py.
 
-Formulation (Section 3.1 — MINMAXBREACH, linearised via path enumeration):
+Formulation (Section 3.1 - MINMAXBREACH, linearised via path enumeration):
 
     min   L
 
@@ -83,7 +83,7 @@ def solve_bilevel_small(
     ]
 
     if not feasible_paths:
-        # Attacker has no affordable path — breach loss is 0 regardless of x
+        # Attacker has no affordable path - breach loss is 0 regardless of x
         x_zero = {arc: 0 for arc in graph.arcs}
         return 0.0, x_zero, 0
 
