@@ -29,6 +29,7 @@ Implementation suggested by Roberto Montemanni.
 
 from __future__ import annotations
 
+import time
 from typing import Dict, List, Tuple
 
 import gurobipy as gp
@@ -146,7 +147,8 @@ def run_new_no_callbacks(
     Lp: int,
     Wp: int,
     solver_msg: bool = False,
-) -> Tuple[float, Dict[Tuple[int, int], int], int]:
+    verbose: bool = True,
+) -> Tuple[float, Dict[Tuple[int, int], int], int, float]:
     """
     Solve the bilevel cyber attack interdiction problem using an explicit
     sequential Benders decomposition loop (no Gurobi callbacks).
@@ -184,6 +186,7 @@ def run_new_no_callbacks(
         x_optimal    : dict {(i,j): 0 or 1} - optimal interdiction plan
         n_iterations : number of Benders iterations performed
     """
+    t0   = time.perf_counter()
     arcs = list(graph.arcs.keys())
     M    = sum(n.reward for n in graph.nodes.values())
 
@@ -219,7 +222,8 @@ def run_new_no_callbacks(
     ub   = M
     free = [(i, j) for (i, j) in arcs if y[i, j].X < 1e-7]
 
-    print(f"  Init  |  LB = {lb:.4f}  |  UB = {ub:.4f}")
+    if verbose:
+        print(f"  Init  |  LB = {lb:.4f}  |  UB = {ub:.4f}")
 
     n_iter = 0
 
@@ -252,10 +256,12 @@ def run_new_no_callbacks(
         lb   = z.X
         free = [(i, j) for (i, j) in arcs if y[i, j].X < 1e-7]
 
-        print(f"  Iter {n_iter:3d}  |  LB = {lb:.4f}  |  UB = {ub:.4f}")
+        if verbose:
+            print(f"  Iter {n_iter:3d}  |  LB = {lb:.4f}  |  UB = {ub:.4f}")
 
-    print(f"\nConverged after {n_iter} iteration(s).  Breach loss = {ub:.4f}")
+    if verbose:
+        print(f"\nConverged after {n_iter} iteration(s).  Breach loss = {ub:.4f}")
 
     x_optimal = {(i, j): int(round(y[i, j].X or 0)) for (i, j) in arcs}
     outer.dispose()
-    return ub, x_optimal, n_iter
+    return ub, x_optimal, n_iter, time.perf_counter() - t0

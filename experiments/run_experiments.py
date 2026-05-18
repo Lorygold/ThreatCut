@@ -6,20 +6,22 @@ Reproduce the computational experiments from:
     "Interdicting Attack Graphs to Protect Organizations from Cyber Attacks"
     Computers & Operations Research, Vol. 75, pp. 118-131
 
-For each (L, W, d, B_defender, B_attacker) combination:
-  - Generate N_INSTANCES random attack graphs
-  - Solve with the exact CCG algorithm
-  - Solve with the LP heuristic
-  - Solve with the greedy heuristic
-  - Report average breach loss, iterations, solve time, and optimality gap
+Three solvers are compared on each instance:
+  1. MinMax        — exact algorithm from the paper (Algorithm 4.3, Gurobi)
+  2. Benders noCbk — sequential Benders loop, no Gurobi callbacks
+  3. Benders Cbk   — lazy constraints via Gurobi callbacks (fastest)
 
-Results are printed as a formatted table and optionally saved to CSV.
+Graph parameters follow Table 2 of the paper:
+  - Nodes  : 50, 100, 150, 200  (≈ 1 + L × W)
+  - Arcs   : ≈ 2.15 × nodes     (d ≈ 2.15 × nodes − W source arcs)
+  - Costs/rewards: "low" preset by default (paper Table 2, low parameter levels)
 
 Usage
 -----
     python experiments/run_experiments.py               # full experiment
     python experiments/run_experiments.py --quick       # small subset only
     python experiments/run_experiments.py --csv out.csv # save to CSV
+    python experiments/run_experiments.py --high_costs  # paper's "high" cost preset
 """
 
 from __future__ import annotations
@@ -29,51 +31,56 @@ import csv
 import sys
 from pathlib import Path
 
-# Allow running from repo root without installing the package
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from data.generator import generate_instances
-from model.algorithm import CCGResult, run_ccg_algorithm, run_heuristic_greedy, run_heuristic_lp
+from data.generator import HIGH_COSTS, LOW_COSTS, generate_attack_graph
+from model.new_callbacks import run_new_callbacks
+from model.new_no_callbacks import run_new_no_callbacks
+from model.paper_algorithm import run_paper_algorithm
 
 
-# Experiment configuration
+# ---------------------------------------------------------------------------
+# Parameter grid  (Table 2 of the paper)
+# Each entry: (L, W, d, B_defender, B_attacker)
+#   nodes ≈ 1 + L*W,   d ≈ round(2.15*(1+L*W)) − W
+# ---------------------------------------------------------------------------
 
-# Full parameter grid from the paper (Section 5)
 FULL_GRID = [
-    # (L, W, d, B_defender, B_attacker)
-    (3, 3, 2, 10, 15),
-    (3, 3, 2, 15, 15),
-    (3, 3, 3, 10, 20),
-    (4, 3, 2, 15, 20),
-    (4, 4, 2, 20, 25),
-    (4, 4, 3, 20, 25),
-    (5, 3, 2, 20, 30),
-    (5, 4, 2, 25, 30),
-    (5, 5, 2, 30, 35),
-    (5, 5, 3, 30, 35),
+    # (L,  W,   d,   B_def, B_att)
+    # ── ~50 nodes ───────────────────────────────────────────────────────
+    (5,  10,  100,   75,  125),
+    (7,   7,  100,   75,  125),
+    # ── ~100 nodes ──────────────────────────────────────────────────────
+    (5,  20,  197,  150,  150),
+    (5,  20,  197,  250,  300),
+    (2,  50,  167,  150,  150),
+    # ── ~150 nodes ──────────────────────────────────────────────────────
+    (5,  30,  295,  275,  325),
+    # ── ~200 nodes ──────────────────────────────────────────────────────
+    (5,  40,  393,  375,  425),
 ]
 
-# Smaller grid for quick smoke test
 QUICK_GRID = [
-    (3, 3, 2, 10, 15),
-    (3, 3, 3, 10, 20),
-    (4, 3, 2, 15, 20),
+    (5,  10,  100,   75,  125),
+    (7,   7,  100,   75,  125),
+    (5,  20,  197,  150,  150),
 ]
 
-N_INSTANCES = 10   # instances per parameter combination (paper uses 10)
+N_INSTANCES = 10
 
 
+# ---------------------------------------------------------------------------
 # Single-instance runner
+# ---------------------------------------------------------------------------
 
 def run_one(
     L: int, W: int, d: int,
     B_defender: float, B_attacker: float,
     instance_seed: int,
+    costs: dict,
 ) -> dict:
-    """Run all three methods on a single graph instance."""
-    from data.generator import generate_attack_graph
-
-    graph = generate_attack_graph(L=L, W=W, d=d, seed=instance_seed)
+    """Run all three solvers on a single graph instance."""
+    graph = generate_attack_graph(L=L, W=W, d=d, seed=instance_seed, **costs)
 
     row: dict = {
         "L": L, "W": W, "d": d,
@@ -83,31 +90,35 @@ def run_one(
         "n_arcs":  len(graph.arcs),
     }
 
-    # --- Exact CCG ---
-    res_ccg = run_ccg_algorithm(graph, B_defender, B_attacker)
-    row["ccg_loss"]   = round(res_ccg.breach_loss, 4)
-    row["ccg_iter"]   = res_ccg.n_iterations
-    row["ccg_time_s"] = round(res_ccg.solve_time_s, 3)
-    row["ccg_gap"]    = round(res_ccg.optimality_gap, 6)
+    # 1. MinMax (paper Algorithm 4.3)
+    mm_loss, _, mm_time, mm_iter = run_paper_algorithm(
+        graph, B_defender, B_attacker
+    )
+    row["mm_loss"]   = round(mm_loss, 4)
+    row["mm_iter"]   = mm_iter
+    row["mm_time_s"] = round(mm_time, 3)
 
-    # --- LP heuristic ---
-    res_lp = run_heuristic_lp(graph, B_defender, B_attacker)
-    row["lp_loss"]   = round(res_lp.breach_loss, 4)
-    row["lp_iter"]   = res_lp.n_iterations
-    row["lp_time_s"] = round(res_lp.solve_time_s, 3)
-    row["lp_gap"]    = round(res_lp.optimality_gap, 6)
+    # 2. Benders no-callbacks
+    nc_loss, _, nc_iter, nc_time = run_new_no_callbacks(
+        graph, B_defender, B_attacker, L, W, verbose=False
+    )
+    row["nc_loss"]   = round(nc_loss, 4)
+    row["nc_iter"]   = nc_iter
+    row["nc_time_s"] = round(nc_time, 3)
 
-    # --- Greedy heuristic ---
-    res_gr = run_heuristic_greedy(graph, B_defender, B_attacker)
-    row["gr_loss"]   = round(res_gr.breach_loss, 4)
-    row["gr_iter"]   = res_gr.n_iterations
-    row["gr_time_s"] = round(res_gr.solve_time_s, 3)
-    row["gr_gap"]    = round(res_gr.optimality_gap, 6)
+    # 3. Benders with callbacks
+    cb_loss, cb_time = run_new_callbacks(
+        graph, B_defender, B_attacker, L, W, verbose=False
+    )
+    row["cb_loss"]   = round(cb_loss, 4)
+    row["cb_time_s"] = round(cb_time, 3)
 
     return row
 
 
+# ---------------------------------------------------------------------------
 # Aggregation helpers
+# ---------------------------------------------------------------------------
 
 def _avg(rows: list[dict], key: str) -> float:
     vals = [r[key] for r in rows if r[key] is not None]
@@ -118,17 +129,19 @@ def _fmt(v: float, decimals: int = 2) -> str:
     return f"{v:.{decimals}f}"
 
 
+# ---------------------------------------------------------------------------
 # Main experiment loop
+# ---------------------------------------------------------------------------
 
-def run_experiments(grid: list, n_instances: int, csv_path: str | None) -> None:
+def run_experiments(grid: list, n_instances: int, csv_path: str | None,
+                    costs: dict) -> None:
     all_rows: list[dict] = []
 
-    # Table header
     header = (
-        f"{'L':>2} {'W':>2} {'d':>2} {'Bd':>4} {'Ba':>4} | "
-        f"{'CCG loss':>9} {'iter':>4} {'time':>6} | "
-        f"{'LP loss':>9} {'gap%':>6} {'time':>6} | "
-        f"{'GR loss':>9} {'gap%':>6} {'time':>6}"
+        f"{'L':>2} {'W':>3} {'d':>4} {'Bd':>5} {'Ba':>5} | "
+        f"{'MinMax loss':>11} {'iter':>4} {'time':>6} | "
+        f"{'NoCbk loss':>10} {'iter':>4} {'time':>6} | "
+        f"{'Cbk loss':>8} {'time':>6}"
     )
     sep = "-" * len(header)
     print(sep)
@@ -139,37 +152,31 @@ def run_experiments(grid: list, n_instances: int, csv_path: str | None) -> None:
         combo_rows = []
 
         for seed in range(n_instances):
-            print(
-                f"  Running L={L} W={W} d={d} Bd={B_def} Ba={B_att} "
-                f"seed={seed} ...",
-                end="\r",
-            )
-            row = run_one(L, W, d, B_def, B_att, instance_seed=seed)
+            print(f"  Running L={L} W={W} d={d} Bd={B_def} Ba={B_att} "
+                  f"seed={seed} ...", end="\r")
+            row = run_one(L, W, d, B_def, B_att, instance_seed=seed, costs=costs)
             combo_rows.append(row)
             all_rows.append(row)
 
-        # Print averaged row
-        ccg_loss = _avg(combo_rows, "ccg_loss")
-        ccg_iter = _avg(combo_rows, "ccg_iter")
-        ccg_time = _avg(combo_rows, "ccg_time_s")
-        lp_loss  = _avg(combo_rows, "lp_loss")
-        lp_gap   = _avg(combo_rows, "lp_gap") * 100
-        lp_time  = _avg(combo_rows, "lp_time_s")
-        gr_loss  = _avg(combo_rows, "gr_loss")
-        gr_gap   = _avg(combo_rows, "gr_gap") * 100
-        gr_time  = _avg(combo_rows, "gr_time_s")
+        mm_loss = _avg(combo_rows, "mm_loss")
+        mm_iter = _avg(combo_rows, "mm_iter")
+        mm_time = _avg(combo_rows, "mm_time_s")
+        nc_loss = _avg(combo_rows, "nc_loss")
+        nc_iter = _avg(combo_rows, "nc_iter")
+        nc_time = _avg(combo_rows, "nc_time_s")
+        cb_loss = _avg(combo_rows, "cb_loss")
+        cb_time = _avg(combo_rows, "cb_time_s")
 
         print(
-            f"{L:>2} {W:>2} {d:>2} {B_def:>4} {B_att:>4} | "
-            f"{_fmt(ccg_loss):>9} {_fmt(ccg_iter,1):>4} {_fmt(ccg_time,3):>6} | "
-            f"{_fmt(lp_loss):>9} {_fmt(lp_gap,2):>5}% {_fmt(lp_time,3):>6} | "
-            f"{_fmt(gr_loss):>9} {_fmt(gr_gap,2):>5}% {_fmt(gr_time,3):>6}"
+            f"{L:>2} {W:>3} {d:>4} {B_def:>5} {B_att:>5} | "
+            f"{_fmt(mm_loss):>11} {_fmt(mm_iter,1):>4} {_fmt(mm_time,3):>6} | "
+            f"{_fmt(nc_loss):>10} {_fmt(nc_iter,1):>4} {_fmt(nc_time,3):>6} | "
+            f"{_fmt(cb_loss):>8} {_fmt(cb_time,3):>6}"
         )
 
     print(sep)
     print(f"\nTotal instances run: {len(all_rows)}")
 
-    # Optionally save to CSV
     if csv_path and all_rows:
         with open(csv_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(all_rows[0].keys()))
@@ -178,23 +185,24 @@ def run_experiments(grid: list, n_instances: int, csv_path: str | None) -> None:
         print(f"Results saved to {csv_path}")
 
 
+# ---------------------------------------------------------------------------
 # Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run attack graph interdiction experiments.")
-    parser.add_argument(
-        "--quick", action="store_true",
-        help="Run only a small subset of the parameter grid (faster)."
+    parser = argparse.ArgumentParser(
+        description="Run attack graph interdiction experiments (3 solvers)."
     )
-    parser.add_argument(
-        "--csv", metavar="PATH",
-        help="Save all results to a CSV file at PATH."
-    )
-    parser.add_argument(
-        "--instances", type=int, default=N_INSTANCES,
-        help=f"Number of random instances per parameter combination (default {N_INSTANCES})."
-    )
+    parser.add_argument("--quick", action="store_true",
+                        help="Run only a small subset of the parameter grid.")
+    parser.add_argument("--csv", metavar="PATH",
+                        help="Save all results to a CSV file at PATH.")
+    parser.add_argument("--instances", type=int, default=N_INSTANCES,
+                        help=f"Instances per parameter combination (default {N_INSTANCES}).")
+    parser.add_argument("--high_costs", action="store_true",
+                        help="Use paper's 'high' cost/reward preset instead of 'low'.")
     args = parser.parse_args()
 
-    grid = QUICK_GRID if args.quick else FULL_GRID
-    run_experiments(grid=grid, n_instances=args.instances, csv_path=args.csv)
+    grid  = QUICK_GRID if args.quick else FULL_GRID
+    costs = HIGH_COSTS if args.high_costs else LOW_COSTS
+    run_experiments(grid=grid, n_instances=args.instances, csv_path=args.csv, costs=costs)

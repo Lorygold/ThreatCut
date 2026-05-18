@@ -230,6 +230,7 @@ def run_new_callbacks(
     Lp: int,
     Wp: int,
     solver_msg: bool = False,
+    verbose: bool = True,
 ) -> Tuple[float, float]:
     """
     Solve the bilevel cyber attack interdiction problem using Gurobi with
@@ -301,7 +302,8 @@ def run_new_callbacks(
     breach_loss = _z.X
     runtime_s   = _prob.Runtime
 
-    print(f"Optimal breach loss: {breach_loss:.4f}  |  Runtime: {runtime_s:.3f}s")
+    if verbose:
+        print(f"Optimal breach loss: {breach_loss:.4f}  |  Runtime: {runtime_s:.3f}s")
 
     _prob.dispose()
     return breach_loss, runtime_s
