@@ -189,11 +189,12 @@ def _solve_minbreachpath(
     for idx, (_, rew) in enumerate(all_paths):
         m.addConstr(eta >= rew * (1 - u[idx]), name=f"obj_cut_{idx}")
 
-    # Constraint (8c): u_p <= x[i,j] for each arc on path p
+    # Constraint (8c): u_p <= sum_{(i,j) in path_p} x[i,j]
     for idx, (path, _) in enumerate(all_paths):
-        for (i, j) in path:
-            if (i, j) in x:
-                m.addConstr(u[idx] <= x[i, j], name=f"path_arc_{idx}_{i}_{j}")
+        m.addConstr(
+            u[idx] <= gp.quicksum(x[i, j] for (i, j) in path if (i, j) in x),
+            name=f"path_cover_{idx}",
+        )
 
     # Constraint (8d): defender budget
     m.addConstr(
@@ -243,6 +244,7 @@ def run_paper_algorithm(
     current_interdict = dict(best_interdict)
 
     all_paths: List[Tuple[List[Tuple[int, int]], float]] = []
+    path_set: set = set()
     iteration = 0
 
     while True:
@@ -260,10 +262,15 @@ def run_paper_algorithm(
         if UB - LB <= epsilon:
             break
 
-        # Add all attack paths found in this iteration to the master problem
-        per_path_rew = ub_val / max(len(paths), 1)
+        # Add new attack paths to the master problem (skip duplicates).
+        # Each path's reward is the goal-node reward it leads to (paper eq. 8a).
         for path in paths:
-            all_paths.append((path, per_path_rew))
+            key = tuple(path)
+            if key not in path_set:
+                path_set.add(key)
+                goal_node = path[-1][1]
+                rew = graph.nodes[goal_node].reward
+                all_paths.append((path, rew))
 
         if not all_paths:
             break
