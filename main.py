@@ -1,10 +1,9 @@
 """
 main.py - Entry point for single-instance runs.
 
-Solves a single attack graph instance with all three solvers:
-  1. MinMax (paper_algorithm) - exact algorithm from the paper (Algorithm 4.3)
-  2. Benders no-callbacks    - sequential Benders loop (Gurobi)
-  3. Benders with callbacks  - lazy constraints via Gurobi callbacks
+Solves a single attack graph instance with all two solvers:
+  1. Benders no-callbacks    - sequential Benders loop (Gurobi)
+  2. Benders with callbacks  - lazy constraints via Gurobi callbacks
 
 Usage
 -----
@@ -35,7 +34,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from data.generator import HIGH_COSTS, LOW_COSTS, draw_attack_graph, generate_attack_graph
 from model.new_callbacks import run_new_callbacks
 from model.new_no_callbacks import run_new_no_callbacks
-from model.paper_algorithm import run_paper_algorithm
 
 
 def print_results(
@@ -91,11 +89,6 @@ def main() -> None:
 
     if args.draw:
         draw_attack_graph(graph, title=f"Attack Graph (L={args.L}, W={args.W}, d={args.d})")
-
-    print("\n[1/3] MinMax (paper Algorithm 4.3) ...")
-    paper_loss, _, paper_time, paper_iter = run_paper_algorithm(
-        graph, args.B_def, args.B_att, solver_msg=args.solver_msg
-    )
 
     print("[2/3] Benders no-callbacks ...")
     nocbk_loss, _, nocbk_iter, nocbk_time = run_new_no_callbacks(

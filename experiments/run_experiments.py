@@ -36,27 +36,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from data.generator import HIGH_COSTS, LOW_COSTS, generate_attack_graph
 from model.new_callbacks import run_new_callbacks
 from model.new_no_callbacks import run_new_no_callbacks
-from model.paper_algorithm import run_paper_algorithm
 
 
-# ---------------------------------------------------------------------------
+
 # Parameter grid  (Table 2 of the paper)
 # Each entry: (L, W, d, B_defender, B_attacker)
 #   nodes ≈ 1 + L*W,   d ≈ round(2.15*(1+L*W)) − W
-# ---------------------------------------------------------------------------
 
 FULL_GRID = [
     # (L,  W,   d,   B_def, B_att)
-    # ── ~50 nodes ───────────────────────────────────────────────────────
+    # ~50 nodes
     (5,  10,  100,   75,  125),
     (7,   7,  100,   75,  125),
-    # ── ~100 nodes ──────────────────────────────────────────────────────
+    # ~100 nodes 
     (5,  20,  197,  150,  150),
     (5,  20,  197,  250,  300),
     (2,  50,  167,  150,  150),
-    # ── ~150 nodes ──────────────────────────────────────────────────────
+    # ~150 nodes 
     (5,  30,  295,  275,  325),
-    # ── ~200 nodes ──────────────────────────────────────────────────────
+    # ~200 nodes 
     (5,  40,  393,  375,  425),
 ]
 
@@ -69,9 +67,8 @@ QUICK_GRID = [
 N_INSTANCES = 10
 
 
-# ---------------------------------------------------------------------------
+
 # Single-instance runner
-# ---------------------------------------------------------------------------
 
 def run_one(
     L: int, W: int, d: int,
@@ -90,15 +87,7 @@ def run_one(
         "n_arcs":  len(graph.arcs),
     }
 
-    # 1. MinMax (paper Algorithm 4.3)
-    mm_loss, _, mm_time, mm_iter = run_paper_algorithm(
-        graph, B_defender, B_attacker
-    )
-    row["mm_loss"]   = round(mm_loss, 4)
-    row["mm_iter"]   = mm_iter
-    row["mm_time_s"] = round(mm_time, 3)
-
-    # 2. Benders no-callbacks
+    # 1. Benders no-callbacks
     nc_loss, _, nc_iter, nc_time = run_new_no_callbacks(
         graph, B_defender, B_attacker, L, W, verbose=False
     )
@@ -106,7 +95,7 @@ def run_one(
     row["nc_iter"]   = nc_iter
     row["nc_time_s"] = round(nc_time, 3)
 
-    # 3. Benders with callbacks
+    # 2. Benders with callbacks
     cb_loss, cb_time = run_new_callbacks(
         graph, B_defender, B_attacker, L, W, verbose=False
     )
@@ -116,9 +105,8 @@ def run_one(
     return row
 
 
-# ---------------------------------------------------------------------------
+
 # Aggregation helpers
-# ---------------------------------------------------------------------------
 
 def _avg(rows: list[dict], key: str) -> float:
     vals = [r[key] for r in rows if r[key] is not None]
@@ -129,9 +117,8 @@ def _fmt(v: float, decimals: int = 2) -> str:
     return f"{v:.{decimals}f}"
 
 
-# ---------------------------------------------------------------------------
+
 # Main experiment loop
-# ---------------------------------------------------------------------------
 
 def run_experiments(grid: list, n_instances: int, csv_path: str | None,
                     costs: dict) -> None:
@@ -185,9 +172,8 @@ def run_experiments(grid: list, n_instances: int, csv_path: str | None,
         print(f"Results saved to {csv_path}")
 
 
-# ---------------------------------------------------------------------------
+
 # Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
