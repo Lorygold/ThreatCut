@@ -2,7 +2,7 @@
 
 Graph Interdiction & Cybersecurity Optimization Framework
 
-Upgraded implementation of the bi-level defender–attacker model from:
+Implementation of the bi-level defender–attacker model from:
 > Nandi, Medal, Vadlamani (2016). *Interdicting Attack Graphs to Protect Organizations from Cyber Attacks.* Computers & Operations Research, 75, 118–131.
 
 ---
@@ -135,6 +135,7 @@ Graphs are generated following the four-step method from the paper:
 
 | File | Description |
 |------|-------------|
+| `model/paper_algorithm.py` | **MinMax** — exact algorithm from the paper (Algorithm 4.3). Alternates between MaxBreachD (attacker) and MinBreachPath (defender). |
 | `model/new_no_callbacks.py` | **Benders no-callbacks** — sequential Benders decomposition loop (Gurobi). Simpler to follow, less efficient. |
 | `model/new_callbacks.py` | **Benders with callbacks** — lazy Benders cuts injected directly into Gurobi's B&B tree. Fastest on large instances. |
 
@@ -148,6 +149,7 @@ ThreatCut/
 │   └── generator.py               # Synthetic graph generation (paper Section 5)
 ├── model/
 │   ├── attack_graph.py            # AttackGraph data structure
+│   ├── paper_algorithm.py         # MinMax exact algorithm (paper Algorithm 4.3)
 │   ├── new_no_callbacks.py        # Benders decomposition — sequential loop (Gurobi)
 │   └── new_callbacks.py           # Benders decomposition — lazy callbacks (Gurobi)
 └── experiments/

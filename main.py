@@ -1,9 +1,10 @@
 """
 main.py - Entry point for single-instance runs.
 
-Solves a single attack graph instance with all two solvers:
-  1. Benders no-callbacks    - sequential Benders loop (Gurobi)
-  2. Benders with callbacks  - lazy constraints via Gurobi callbacks
+Solves a single attack graph instance with all three solvers:
+  1. MinMax (paper_algorithm) - exact algorithm from the paper (Algorithm 4.3)
+  2. Benders no-callbacks    - sequential Benders loop (Gurobi)
+  3. Benders with callbacks  - lazy constraints via Gurobi callbacks
 
 Usage
 -----
@@ -32,8 +33,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from data.generator import HIGH_COSTS, LOW_COSTS, draw_attack_graph, generate_attack_graph
-from model.new_callbacks import run_new_callbacks
 from model.new_no_callbacks import run_new_no_callbacks
+from model.paper_algorithm import run_paper_algorithm
 
 
 def print_results(
@@ -89,24 +90,33 @@ def main() -> None:
 
     if args.draw:
         draw_attack_graph(graph, title=f"Attack Graph (L={args.L}, W={args.W}, d={args.d})")
-
+    
+    print("\n[1/3] MinMax (paper Algorithm 4.3) ...")
+    paper_bound,paper_loss, _, paper_time, paper_iter = run_paper_algorithm(
+        graph, args.B_def, args.B_att, solver_msg=args.solver_msg
+    )
     print("[2/3] Benders no-callbacks ...")
-    nocbk_loss, _, nocbk_iter, nocbk_time = run_new_no_callbacks(
-        graph, args.B_def, args.B_att, args.L, args.W,
-        solver_msg=args.solver_msg, verbose=True,
-    )
 
-    print("[3/3] Benders with callbacks ...")
-    cbk_loss, cbk_time = run_new_callbacks(
-        graph, args.B_def, args.B_att, args.L, args.W,
-        solver_msg=args.solver_msg, verbose=True,
+    nocbk_bound,nocbk_loss, _, nocbk_time, nocbk_iter=run_new_no_callbacks(
+        graph, args.B_def, args.B_att, args.L, args.W, solver_msg=args.solver_msg
     )
-
+    '''
+    print("[3/3] Benders callbacks ...")
+    cbk_bound,cbk_loss, cbk_time = run_new_callbacks(
+        graph, args.B_def, args.B_att, args.L, args.W, solver_msg=args.solver_msg
+    )
+    '''
+    #paper_bound=paper_loss=paper_time=paper_iter=-1 # RM
+    #nocbk_bound=nocbk_loss=nocbk_time=nocbk_iter=-1 # RM
+    cbk_lb=cbk_loss=cbk_time=cbk_iter=-1 # RM
     print_results(
         paper_loss, paper_time, paper_iter,
         nocbk_loss, nocbk_time, nocbk_iter,
         cbk_loss,   cbk_time,
     )
+    
+    # RM
+    ss="DA "+str(args)+" "+str(round(paper_bound,2))+" "+str(int(paper_loss))+" "+str(round(paper_time,2))+" "+str(round(paper_iter,0))+" "+str(round(nocbk_bound,2))+" "+str(int(nocbk_loss))+" "+str(round(nocbk_time,2))+" "+str(round(nocbk_iter,2))+"\n";f1=open("output.out", "a");f1.write(ss);f1.close();
 
 
 if __name__ == "__main__":
