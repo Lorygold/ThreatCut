@@ -37,8 +37,6 @@ def _solve_maxbreach(
     graph: AttackGraph,
     B_attacker: float,
     interdicted: list(),
-    _L:int,
-    _W:int,
     solver_msg: bool = False,
 ) -> Tuple[float, List[List[Tuple[int, int]]]]:
     """
@@ -62,94 +60,92 @@ def _solve_maxbreach(
     m = gp.Model("MaxBreachD")
     m.Params.OutputFlag = 1 if solver_msg else 0
 
+    # w[i,j] = 1 if arc (i,j) is used in at least one attack path
+    w = {(i, j): m.addVar(vtype=GRB.BINARY, name=f"w_{i}_{j}") for (i, j) in free}
 
+    # y[t,i,j] = 1 if goal t is attacked via arc (i,j)
+    y = {
+        (t, i, j): m.addVar(vtype=GRB.BINARY, name=f"y_{t}_{i}_{j}")
+        for t in goal_nodes
+        for (i, j) in free
+    }
 
-    inner = gp.Model("inner")
-    inner.Params.OutputFlag = 0
-    inner.Params.LazyConstraints=1 # RM
-    _M=sum(graph.nodes[j].reward for j in graph.nodes)
-    _x = {(i, j): inner.addVar(vtype=GRB.BINARY,     name=f"x_{i}_{j}") for (i, j) in free}
-    u = {i: inner.addVar(vtype=GRB.INTEGER, name=f"u_{i}") for i in graph.nodes}
-    _u = {(i, j): inner.addVar(vtype=GRB.CONTINUOUS, ub=_M, name=f"u_{i}_{j}") for (i, j) in free} # RM ub
-    _v = inner.addVar(lb=0.0, ub=_M, vtype=GRB.CONTINUOUS, name="v")
+    # z[t] = 1 if goal node t is breached
+    z = {t: m.addVar(vtype=GRB.BINARY, name=f"z_{t}") for t in goal_nodes}
 
-    inner.setObjective(_v, GRB.MAXIMIZE)
-
-    # Total profit at root = sum of u on arcs leaving node 0
-    
-    inner.addConstr( # extra
-        _v == gp.quicksum(graph.nodes[j].reward*_x[i, j] for (i, j) in free if graph.nodes[j].reward > 0),
-        name="root_profit",
+    # Maximise total breach reward
+    m.setObjective(
+        gp.quicksum(graph.nodes[t].reward * z[t] for t in goal_nodes),
+        GRB.MAXIMIZE,
     )
 
-    inner.addConstr(
-        _v == gp.quicksum(_u[i, j] for (i, j) in free if i == 0),
-        name="root_profit",
-    )
-    
-    for (i, j) in free:
-        inner.addConstr(_u[i, j] <= _M * _x[i, j], name=f"bigM_{i}_{j}")
-        out_arcs = [(l, k) for (l, k) in free if l == j]
-        inner.addConstr(
-                _u[i, j] <= graph.nodes[j].reward * _x[i, j] + gp.quicksum(_u[l, k] for (l, k) in out_arcs),
-                name=f"goal_reward_{i}_{j}",
-            )
-        
-    # Attacker budget
-    inner.addConstr(
-        gp.quicksum(graph.arcs[i, j].cost_attack * _x[i, j] for (i, j) in free)
-        <= B_attacker,
-        name="attacker_budget",
-    )
-    # Arborescence: at most one incoming arc per node
-    
-    for node_id in graph.nodes:
-        in_arcs = [(i, j) for (i, j) in free if j == node_id]
-        inner.addConstr( # extra
-            gp.quicksum(_x[i, j] for (i, j) in in_arcs) <= 1,
-            name=f"arborescence_{node_id}",
+    # Constraint (4b): z[t] = sum of y[t,i,t] for incoming arcs of goal t
+    for t in goal_nodes:
+        m.addConstr(
+            z[t] == gp.quicksum(y[t, i, j] for (i, j) in free if j == t),
+            name=f"breach_{t}",
         )
+
+    # Constraint (4c)+(4d): flow balance – attacks for goal t must not stop
+    # at intermediate nodes (non-source, non-goal)
     
-    for l in range(1,_L):
-        idx  = 1 + (l - 1) * _W
-        idx2 = 1 + l * _W
-        inner.addConstr( # extra
-                gp.quicksum(
-                    _u[i, j]
-                    for i in range(idx,  idx  + _W)
-                    for j in range(idx2, idx2 + _W)
-                    if (i, j) in _x
-                ) == _v,
-                name=f"level_flow_{l}",
-        )
-    
-    for (i,j) in free:
-        
+    non_goal_non_src = [n for n in graph.nodes if n not in goal_nodes and n != 0]
+    for t in goal_nodes:
+        for i in non_goal_non_src:
+            m.addConstr(gp.quicksum(y[t, k, j] for (k, j) in free if k == i)-gp.quicksum(y[t, k, j] for (k, j) in free if j == i)==0)
+        for i in goal_nodes:
+            if i!=t:
+                m.addConstr(gp.quicksum(y[t, k, j] for (k, j) in free if k == i)-gp.quicksum(y[t, k, j] for (k, j) in free if j == i and k!=t)==0)
+                
+    for i in graph.nodes:
         if i!=0:
-            in_arcs = [(k, l) for (k, l) in free if l == i]
-            inner.addConstr( # extra
-                gp.quicksum(_x[k, l] for (k, l) in in_arcs) >= _x[i,j],
-                name=f"arborescence",
-            )
+            m.addConstr(gp.quicksum(w[k, j] for (k, j) in free if j == i)<=1)
 
-        inner.addConstr((_x[i,j] == 1) >> (u[j] == u[i]+1),  name="indicator_constr1") # extra
-    inner.addConstr(u[0]==0) # extra
-    
-    
-    inner.optimize()
 
-    if inner.Status != GRB.OPTIMAL:
-        inner.dispose()
+    # Constraint (4e): y[t,i,j] <= w[i,j]
+    for t in goal_nodes:
+        for (i, j) in free:
+            m.addConstr(y[t, i, j] <= w[i, j], name=f"link_{t}_{i}_{j}")
+
+    # Constraint (4g): attacker budget
+    m.addConstr(
+        gp.quicksum(graph.arcs[i, j].cost_attack * w[i, j] for (i, j) in free)
+        <= B_attacker,
+        name="budget_attacker",
+    )
+
+    '''
+3 17
+17 22
+22 37
+46 47
+37 42
+41 46
+37 41
+
+37 44
+22 37
+46 47
+37 46
+37 41
+13 22
+1 13
+    '''
+
+    
+    m.optimize()
+
+
+    if m.Status != GRB.OPTIMAL:
+        m.dispose()
         return 0.0, []
-    
 
-    obj_val = int(inner.ObjVal)
+    obj_val = int(m.ObjVal)
 
     # Extract one attack path per breached goal node
     paths: List[List[Tuple[int, int]]] = []
     for t in goal_nodes:
-        k=sum(_x[i,j].X for (i,j) in free if j==t)
-        if k<=0:
+        if z[t].X < 0.5:
             continue
         path = []
         current = t
@@ -160,7 +156,7 @@ def _solve_maxbreach(
                 for (k, l) in free
                 if l == current
                 and (k, current) not in visited
-                and _x[k, current].X > 0.5
+                and y[t, k, current].X > 0.5
             ]
             if not pred:
                 break
@@ -174,7 +170,8 @@ def _solve_maxbreach(
             paths.append(path)
     m.dispose()
     return obj_val, paths
-    
+
+
 
 # Master-problem: MinBreachPath  (defender, path-based – eq. 8 of the paper)
 
@@ -202,8 +199,10 @@ def _solve_minbreachpath(
     m = gp.Model("MinBreachPath")
     m.Params.OutputFlag = 1 if solver_msg else 0
 
+    # x[i,j] = 1 if arc interdicted by defender
     x = {(i, j): m.addVar(vtype=GRB.BINARY, name=f"x_{i}_{j}") for (i, j) in all_arcs}
 
+    # u[p] in [0,1]: 1 if path p is fully covered (all arcs interdicted)
     u = [m.addVar(vtype=GRB.BINARY, name=f"u_{p}") for p in range(len(all_paths))]
 
     eta = m.addVar(lb=0.0, name="eta")
@@ -253,12 +252,11 @@ def _solve_minbreachpath(
 # Entry point
 
 
-def run_new_no_callbacks(
+def run_paper_algorithm(
     graph: AttackGraph,
     B_defender: float,
     B_attacker: float,
-    L:int,
-    W:int,
+    epsilon: float = 1e-4,
     solver_msg: bool = False,
 ) -> Tuple[float, Dict[Tuple[int, int], int], float, int]:
     """
@@ -286,13 +284,13 @@ def run_new_no_callbacks(
         iteration += 1
         # Solve attacker sub-problem
         ub_val, paths = _solve_maxbreach(
-            graph, B_attacker, current_interdict, L,W,solver_msg
+            graph, B_attacker, current_interdict, solver_msg
         )
         if ub_val<UB:
             UB = ub_val
 
         print(LB,UB,round(time.time()-t0,2))
-        if UB - LB <= 1e-4:
+        if UB - LB <= epsilon:
             break
 
         # Add new attack paths to the master problem (skip duplicates).
@@ -314,5 +312,5 @@ def run_new_no_callbacks(
             graph, B_defender, all_paths, attacks,solver_msg
         )
         LB = lb_val
-
+    
     return int(LB), UB, current_interdict, time.time() - t0, iteration

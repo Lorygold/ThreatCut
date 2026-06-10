@@ -140,6 +140,12 @@ def generate_attack_graph(
             for dst in (_node_id(level+1, j, W) for j in range(W))
             if (src, dst) not in graph.arcs
         ]
+        # RM in - this includes arcs between nodes of the last level
+        for src in (_node_id(L, i, W) for i in range(W)):
+            for dst in (_node_id(L, j, W) for j in range(W)):
+                if src!=dst: candidates.append((src,dst))
+        # RM out
+        
         rng.shuffle(candidates)
         for src, dst in candidates:
             if _non_source_count() >= d:
